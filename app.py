@@ -125,6 +125,9 @@ def acc_class(val):
     if val >= 50: return "accuracy-mid"
     return "accuracy-low"
 
+def clear_state(key):
+    st.session_state[key] = ""
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #   CURRENT AFFAIRS
@@ -264,9 +267,7 @@ elif page == "CA Quiz":
 
             col_content, col_close = st.columns([20, 1])
             with col_close:
-                if st.button("✕", key=f"x_ca_{item_id}", help="Close"):
-                    st.session_state["sel_ca"] = ""
-                    safe_rerun()
+                st.button("✕", key=f"x_ca_{item_id}", help="Close", on_click=clear_state, args=("sel_ca",))
             with col_content:
                 st.text_area("Content", content, height=280, key=f"ta_ca_{item_id}")
 
@@ -346,9 +347,7 @@ elif page == "PDF Quiz":
 
             col_content, col_close = st.columns([20, 1])
             with col_close:
-                if st.button("✕", key=f"x_pdf_{item_id}", help="Close"):
-                    st.session_state["sel_pdf"] = ""
-                    safe_rerun()
+                st.button("✕", key=f"x_pdf_{item_id}", help="Close", on_click=clear_state, args=("sel_pdf",))
             with col_content:
                 st.text_area("Content", content, height=280, key=f"ta_pdf_{item_id}")
 
@@ -398,9 +397,7 @@ elif page == "PYQ Predictor":
 
             col_content, col_close = st.columns([20, 1])
             with col_close:
-                if st.button("✕", key=f"x_pyq_{item_id}", help="Close"):
-                    st.session_state["sel_pyq"] = ""
-                    safe_rerun()
+                st.button("✕", key=f"x_pyq_{item_id}", help="Close", on_click=clear_state, args=("sel_pyq",))
             with col_content:
                 st.text_area("Content", content, height=280, key=f"ta_pyq_{item_id}")
 
@@ -575,9 +572,7 @@ Be specific, thorough, and UPSC-focused."""
             # Close (X) button
             col_h, col_x = st.columns([20, 1])
             with col_x:
-                if st.button("✕", key=f"x_report_{report_id}", help="Close"):
-                    st.session_state["sel_report"] = ""
-                    safe_rerun()
+                st.button("✕", key=f"x_report_{report_id}", help="Close", on_click=clear_state, args=("sel_report",))
             with col_h:
                 st.markdown(f"**Period:** {report[2]}")
 
@@ -772,9 +767,7 @@ elif page == "Test Paper Analysis":
             # Close button
             col_t, col_x = st.columns([20, 1])
             with col_x:
-                if st.button("✕", key=f"x_care_{tp_id}", help="Close"):
-                    st.session_state["sel_care_test"] = ""
-                    safe_rerun()
+                st.button("✕", key=f"x_care_{tp_id}", help="Close", on_click=clear_state, args=("sel_care_test",))
             with col_t:
                 st.markdown(f"**📋 Carelessness Notes for: {tp_name}**")
 
