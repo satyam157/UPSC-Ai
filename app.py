@@ -129,7 +129,7 @@ def login_page():
             if username in CREDENTIALS and CREDENTIALS[username] == password:
                 st.session_state["logged_in"] = True
                 st.session_state["username"] = username
-                components.html(
+                st.iframe(
                     f"<script>document.cookie = 'upsc_username={username}; max-age=31536000; path=/'; window.parent.location.reload();</script>",
                     height=0, width=0
                 )
@@ -140,7 +140,7 @@ def login_page():
 def logout():
     st.session_state["logged_in"] = False
     st.session_state["username"] = ""
-    components.html(
+    st.iframe(
         "<script>document.cookie = 'upsc_username=; max-age=0; path=/'; window.parent.location.reload();</script>",
         height=0, width=0
     )
