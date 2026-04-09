@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import PyPDF2
-import streamlit.components.v1 as components
 from datetime import date, datetime, timedelta
 import json
 
@@ -27,82 +26,26 @@ st.set_page_config(page_title="UPSC AI System", layout="wide")
 # ─── CUSTOM CSS ───────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* ── Popup overlay ── */
-.popup-overlay {
-    position: fixed; inset: 0;
-    background: rgba(0,0,0,0.65);
-    z-index: 9998;
-    display: flex; align-items: center; justify-content: center;
-}
-.popup-box {
-    background: #1e1e2e;
-    border: 1px solid #7c3aed;
-    border-radius: 14px;
-    padding: 28px 32px;
-    max-width: 780px;
-    width: 95%;
-    max-height: 84vh;
-    overflow-y: auto;
-    position: relative;
-    color: #e2e8f0;
-}
-.popup-close {
-    position: absolute;
-    top: 12px; right: 16px;
-    font-size: 22px;
-    cursor: pointer;
-    color: #a78bfa;
-    background: none;
-    border: none;
-    line-height: 1;
-}
-.popup-close:hover { color: #ef4444; }
-
-/* ── Table styles ── */
-.test-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.test-table th, .test-table td {
-    border: 1px solid #374151;
-    padding: 8px 10px;
-    text-align: center;
-    color: #e2e8f0;
-}
-.test-table th { background: #2d1b6b; color: #c4b5fd; font-weight: 600; }
-.test-table tr:nth-child(even) { background: #1a1a2e; }
-.test-table tr:hover { background: #2d2d44; }
-.read-more-btn {
-    background: #7c3aed; color: white; border: none;
-    padding: 4px 10px; border-radius: 6px; cursor: pointer;
-    font-size: 12px;
-}
-.read-more-btn:hover { background: #6d28d9; }
+.popup-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.65); z-index: 9998; display: flex; align-items: center; justify-content: center;}
+.popup-box { background: #1e1e2e; border: 1px solid #7c3aed; border-radius: 14px; padding: 28px 32px; max-width: 780px; width: 95%; max-height: 84vh; overflow-y: auto; position: relative; color: #e2e8f0;}
+.popup-close { position: absolute; top: 12px; right: 16px; font-size: 22px; cursor: pointer; color: #a78bfa; background: none; border: none;}
+.popup-close:hover { color: #ef4444;}
+.test-table { width: 100%; border-collapse: collapse; font-size: 13px;}
+.test-table th, .test-table td { border: 1px solid #374151; padding: 8px 10px; text-align: center; color: #e2e8f0;}
+.test-table th { background: #2d1b6b; color: #c4b5fd;}
+.test-table tr:nth-child(even) { background: #1a1a2e;}
+.test-table tr:hover { background: #2d2d44;}
+.read-more-btn { background: #7c3aed; color: white; border: none; padding: 4px 10px; border-radius: 6px; cursor: pointer;}
+.section-card { background: #16162a; border: 1px solid #312e81; border-radius: 12px; padding: 18px 22px; margin-bottom: 18px;}
 .accuracy-good { color: #34d399; font-weight: 600; }
 .accuracy-mid  { color: #fbbf24; font-weight: 600; }
 .accuracy-low  { color: #f87171; font-weight: 600; }
-
-/* ── Filter tags ── */
-.filter-tag {
-    display: inline-flex; align-items: center;
-    background: #2d1b6b; color: #c4b5fd;
-    border-radius: 20px; padding: 4px 12px;
-    margin: 4px; font-size: 13px;
-}
-.filter-tag .tag-x {
-    margin-left: 8px; cursor: pointer; color: #f87171;
-    font-weight: bold;
-}
-
-/* ── Section card ── */
-.section-card {
-    background: #16162a;
-    border: 1px solid #312e81;
-    border-radius: 12px;
-    padding: 18px 22px;
-    margin-bottom: 18px;
-}
+.filter-tag { display: inline-flex; align-items: center; background: #2d1b6b; color: #c4b5fd; border-radius: 20px; padding: 4px 12px; margin: 4px; font-size: 13px; }
+.filter-tag .tag-x { margin-left: 8px; cursor: pointer; color: #f87171; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── AUTH ─────────────────────────────────────────────────────────────────────
+# ─── AUTH (UPDATED) ───────────────────────────────────────────────────────────
 CREDENTIALS = {
     "admin": "admin123",
     "esu": "satyam",
@@ -111,40 +54,42 @@ CREDENTIALS = {
 }
 
 if "logged_in" not in st.session_state:
-    saved_user = st.context.cookies.get("upsc_username") if hasattr(st, "context") else None
-    if saved_user and saved_user in CREDENTIALS:
-        st.session_state["logged_in"] = True
-        st.session_state["username"] = saved_user
-    else:
-        st.session_state["logged_in"] = False
-        st.session_state["username"] = ""
+    st.session_state["logged_in"] = False
+    st.session_state["username"] = ""
+
+# Optional: auto login using query params
+params = st.query_params
+saved_user = params.get("user")
+
+if saved_user and saved_user in CREDENTIALS:
+    st.session_state["logged_in"] = True
+    st.session_state["username"] = saved_user
 
 def login_page():
+    st.markdown("## 🔐 Login to UPSC AI SYSTEM")
     with st.form("login_form"):
-        st.subheader("Login to UPSC AI SYSTEM")
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         submit = st.form_submit_button("Login")
+
         if submit:
             if username in CREDENTIALS and CREDENTIALS[username] == password:
                 st.session_state["logged_in"] = True
                 st.session_state["username"] = username
-                components.html(
-                    f"<script>document.cookie = 'upsc_username={username}; max-age=31536000; path=/'; window.parent.location.reload();</script>",
-                    height=0
-                )
-                st.stop()
+
+                # Save login in URL (optional persistence)
+                st.query_params["user"] = username
+
+                st.success("✅ Login successful!")
+                st.rerun()
             else:
-                st.error("Invalid Username or Password")
+                st.error("❌ Invalid Username or Password")
 
 def logout():
-    st.session_state["logged_in"] = False
-    st.session_state["username"] = ""
-    components.html(
-        "<script>document.cookie = 'upsc_username=; max-age=0; path=/'; window.parent.location.reload();</script>",
-        height=0
-    )
-    st.stop()
+    st.session_state.clear()
+    st.query_params.clear()
+    st.success("Logged out successfully")
+    st.rerun()
 
 if not st.session_state["logged_in"]:
     login_page()
