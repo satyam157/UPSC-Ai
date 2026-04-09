@@ -134,21 +134,11 @@ def clear_state(key):
 # ══════════════════════════════════════════════════════════════════════════════
 if page == "Current Affairs":
     # ── Control row ──────────────────────────────────────────────────────────
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 Refresh Content"):
+    if st.button("🔄 Refresh Content", use_container_width=True):
+        with st.spinner("Fetching news..."):
             insert_news(fetch_news())
-            st.success("Updated!")
-    with col2:
-        username = st.session_state["username"]
-        current_retention = get_retention(username)
-        retention_days = st.number_input("Data Retention (Days)", min_value=1, max_value=365, value=current_retention)
-        if retention_days != current_retention:
-            set_retention(username, retention_days)
-            st.success("Retention saved!")
-        if st.button("Apply Retention Rules"):
-            clean_old(days=retention_days)
-            st.success(f"Cleaned data older than {retention_days} days!")
+        st.toast("✅ Feed updated successfully!")
+        safe_rerun()
 
     # ── CA Filter Section ─────────────────────────────────────────────────────
     st.markdown("---")
@@ -204,6 +194,24 @@ if page == "Current Affairs":
                         st.markdown(f"**• {n[0]}**")
     else:
         st.info("No Current Affairs data available. Please refresh to fetch current affairs.")
+
+    # ── Retention Rules (Moved to Bottom) ─────────────────────────────────────
+    st.markdown("---")
+    username = st.session_state["username"]
+    current_retention = get_retention(username)
+    
+    col_ret_label, col_ret_input, col_ret_apply = st.columns([1.5, 1, 1.5])
+    with col_ret_label:
+        st.markdown('<p style="text-align:right; margin-top:10px; font-weight:600; color:#c4b5fd;">Data Retention Settings:</p>', unsafe_allow_html=True)
+    with col_ret_input:
+        retention_days = st.number_input("Retention Days", min_value=1, max_value=365, value=current_retention, label_visibility="collapsed")
+        if retention_days != current_retention:
+            set_retention(username, retention_days)
+            st.toast(f"⚙️ Retention set to {retention_days} days")
+    with col_ret_apply:
+        if st.button("🧹 Apply Rules", use_container_width=True, help="Delete data older than retention period"):
+            clean_old(days=retention_days)
+            st.success(f"🗑️ Cleaned data older than {retention_days} days!")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
