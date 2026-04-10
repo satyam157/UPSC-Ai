@@ -1,4 +1,4 @@
-**UPSC-Ai URL: **[Link Text](https://upsc-ai-1l60.onrender.com)
+**UPSC-Ai**
 
 pip install fastapi uvicorn streamlit requests feedparser python-dotenv groq PyPDF2
 pip install streamlit feedparser groq python-dotenv PyPDF2
@@ -12,26 +12,44 @@ python -m streamlit run app.py
 
 net start postgresql-x64-18
 
-GitHub PAT TOKEN: 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
 
+The News Display Limit is structured across database query and UI levels:
 
+1. Global Database Query Limit (news_display_limit)
+Current Value: 600 articles (active in system_config).
+How it works: When fetching news from PostgreSQL in 
 
+get_news()
+, it queries the most recent articles up to this limit:
+sql
+SELECT title, content, date, url, source, category 
+FROM news 
+ORDER BY date DESC, id DESC 
+LIMIT 600;
+2. Daily Database Retention Cap (news_max_per_day)
+Current Value: 40 articles per day (active in system_config).
+How it works: In 
 
-"add GPT-like answer explanations + answer evaluation + scoring system"
-"add answer evaluation + UPSC scoring + mains answer writing checker"
+trim_news_to_max()
+, regular news and PIB articles are scored and trimmed to keep the top 40 items per date (Editorials, Explained, and Opinion pieces are exempt and always kept).
+3. UI Display Limits per Date Expander (
 
+page_ca.py
+)
+When browsing news grouped by Year ➔ Month ➔ Date, each category tab applies a per-date display limit:
 
+All News Tab: up to 50 items per date (limit=50)
+Editorials Tab: up to 20 items per date (limit=20)
+Explained Tab: up to 20 items per date (limit=20)
+PIB Tab: up to 15 items per date (limit=15)
+Manual Sync Tab: up to 50 items per date (limit=50)
+⚙️ How to Adjust the Limit:
+As an administrator, you can change both values at any time from:
 
+Admin Panel ➔ 📰 News & System Settings tab:
 
-
-
-
-
-
-
-
-
-
+News Display Limit: Adjustable from 50 to 2,000 (step 50).
+Max News Per Day: Adjustable from 10 to 100 (step 5).
 
 
 
