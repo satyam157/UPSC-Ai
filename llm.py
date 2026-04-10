@@ -12,9 +12,10 @@ def ask_llm(prompt):
     from groq import Groq
     import os
 
-    api_key = os.getenv("GROQ_API_KEY")
+    import streamlit as st
+    api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
     if not api_key:
-        return "❌ API Key missing. Check .env file."
+        return "❌ API Key missing. Check .env file or Streamlit secrets."
 
     client = Groq(api_key=api_key)
 
@@ -46,7 +47,9 @@ def ask_llm_vision(prompt, image_base64, mime_type="image/png"):
     from groq import Groq
     import os
 
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    import streamlit as st
+    api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+    client = Groq(api_key=api_key)
 
     vision_models = [
         "llama-3.2-90b-vision-preview",

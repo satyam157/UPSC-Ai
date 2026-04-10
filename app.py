@@ -43,6 +43,7 @@ st.markdown("""
 .accuracy-low  { color: #f87171; font-weight: 600; }
 .filter-tag { display: inline-flex; align-items: center; background: #2d1b6b; color: #c4b5fd; border-radius: 20px; padding: 4px 12px; margin: 4px; font-size: 13px; }
 .filter-tag .tag-x { margin-left: 8px; cursor: pointer; color: #f87171; font-weight: bold; }
+[data-testid="collapsedControl"] { display: none; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,23 +100,9 @@ if not st.session_state["logged_in"]:
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 st.sidebar.title(f"👤 {st.session_state['username']}")
 
-# ── Sidebar Collapse Toggle ───────────────────────────────────────────────────
-col_logout, col_collapse = st.sidebar.columns([1, 0.5])
-with col_logout:
-    if st.button("Logout", use_container_width=True, key="btn_logout_sidebar"):
-        logout()
-with col_collapse:
-    if st.button("⬅️", use_container_width=True, key="btn_collapse_sidebar", help="Minimize sidebar"):
-        st.markdown("""
-        <style>
-            [data-testid="stSidebar"] {
-                max-width: 80px;
-            }
-            [data-testid="stSidebar"] > div:first-child {
-                overflow: hidden;
-            }
-        </style>
-        """, unsafe_allow_html=True)
+# ── Sidebar Logout ────────────────────────────────────────────────────────────
+if st.sidebar.button("Logout", use_container_width=True, key="btn_logout_sidebar"):
+    logout()
 
 page = st.sidebar.radio("Navigate", [
     "Current Affairs",

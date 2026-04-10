@@ -7,7 +7,15 @@ load_dotenv()
 
 # Initialize the client once.
 # Groq() automatically looks for "GROQ_API_KEY" in your env by default.
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+import streamlit as st
+api_key = os.environ.get("GROQ_API_KEY")
+if not api_key:
+    try:
+        api_key = st.secrets.get("GROQ_API_KEY")
+    except:
+        api_key = None
+
+client = Groq(api_key=api_key)
 
 
 def ask_llm(prompt):

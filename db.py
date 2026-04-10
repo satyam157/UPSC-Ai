@@ -51,12 +51,14 @@ def _init_schema(connection):
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS news (
                     id SERIAL PRIMARY KEY,
-                    title TEXT UNIQUE,
+                    title TEXT,
                     content TEXT,
                     url TEXT,
                     date TEXT
                 )
             """)
+            # Fix duplicates before creating unique index
+            cur.execute("DELETE FROM news a USING news b WHERE a.id < b.id AND a.title = b.title")
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS news_title_uq ON news (title)")
 
             cur.execute("""
@@ -98,10 +100,13 @@ def _init_schema(connection):
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ca_filters (
                     id SERIAL PRIMARY KEY,
-                    word TEXT UNIQUE,
+                    word TEXT,
                     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # Cleanup duplicates in filters
+            cur.execute("DELETE FROM ca_filters a USING ca_filters b WHERE a.id < b.id AND a.word = b.word")
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ca_filters_word_uq ON ca_filters (word)")
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ai_reports (
