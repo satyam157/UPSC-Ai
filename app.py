@@ -14,11 +14,12 @@ from db import (
     save_test_paper, get_test_papers, delete_test_paper
 )
 from quiz_generator import generate_quiz
-from llm import ask_llm
+from llm import ask_llm, ask_llm_vision
+import base64
 from quiz_parser import parse_quiz
 from quiz_engine import evaluate
 from pdf_utils import generate_pdf
-from pyq_engine import predict
+from pyq_engine import predict, generate_prelims_pyqs, generate_mains_pyqs, generate_full_pyq_session
 
 # ─── PAGE CONFIG ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="UPSC AI System", layout="wide")
@@ -97,17 +98,33 @@ if not st.session_state["logged_in"]:
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 st.sidebar.title(f"👤 {st.session_state['username']}")
-if st.sidebar.button("Logout"):
-    logout()
+
+# ── Sidebar Collapse Toggle ───────────────────────────────────────────────────
+col_logout, col_collapse = st.sidebar.columns([1, 0.5])
+with col_logout:
+    if st.button("Logout", use_container_width=True, key="btn_logout_sidebar"):
+        logout()
+with col_collapse:
+    if st.button("⬅️", use_container_width=True, key="btn_collapse_sidebar", help="Minimize sidebar"):
+        st.markdown("""
+        <style>
+            [data-testid="stSidebar"] {
+                max-width: 80px;
+            }
+            [data-testid="stSidebar"] > div:first-child {
+                overflow: hidden;
+            }
+        </style>
+        """, unsafe_allow_html=True)
 
 page = st.sidebar.radio("Navigate", [
     "Current Affairs",
     "CA Quiz",
+    "Practice",
     "PDF Quiz",
     "Results",
     "AI Analysis",
-    "Test Paper Analysis",
-    "PYQ Predictor"
+    "Test Paper Analysis"
 ])
 
 st.title("📚 UPSC AI SYSTEM")
@@ -140,41 +157,6 @@ if page == "Current Affairs":
         st.toast("✅ Feed updated successfully!")
         safe_rerun()
 
-    # ── CA Filter Section ─────────────────────────────────────────────────────
-    st.markdown("---")
-    with st.expander("🔧 Manage CA Topic Filters", expanded=False):
-        st.markdown("Add words/phrases below. Any news headline containing these words will be **hidden** from the feed.")
-        
-        # Show existing tags
-        existing_filters = get_ca_filters()
-        if existing_filters:
-            tags_html = ""
-            for fid, word in existing_filters:
-                tags_html += f'<span class="filter-tag">{word}<span class="tag-x" title="Remove">✕</span></span>'
-            st.markdown(f'<div>{tags_html}</div>', unsafe_allow_html=True)
-            
-            # Remove filter UI
-            filter_options = [f"{word} (id:{fid})" for fid, word in existing_filters]
-            to_remove = st.selectbox("Select filter to remove", [""] + filter_options, key="rm_filter")
-            if to_remove and st.button("Remove Filter Word", key="btn_rm_filter"):
-                fid = int(to_remove.split("id:")[1].rstrip(")"))
-                delete_ca_filter(fid)
-                st.success("Filter removed!")
-                safe_rerun()
-        else:
-            st.info("No filter words added yet.")
-
-        # Add new filter
-        with st.form("add_filter_form"):
-            new_word = st.text_input("New filter word / phrase (e.g. 'cricket', 'bollywood')")
-            if st.form_submit_button("➕ Add Filter"):
-                if new_word.strip():
-                    add_ca_filter(new_word.strip())
-                    st.success(f"Added filter: '{new_word.strip()}'")
-                    safe_rerun()
-                else:
-                    st.warning("Please enter a word first.")
-
     # ── News Feed ─────────────────────────────────────────────────────────────
     st.markdown("---")
     news_data = get_news()
@@ -184,34 +166,187 @@ if page == "Current Affairs":
         tl = title.lower()
         return any(fw in tl for fw in filter_words)
 
+    # ── Initialize news summary state ─────────────────────────────────────────
+    if "news_summaries" not in st.session_state:
+        st.session_state["news_summaries"] = {}  # key: title, value: summary
+
     if news_data:
-        dates = sorted(list(set(n[2] for n in news_data)), reverse=True)
+        # Deduplicate by title (keep the most recent entry per title)
+        seen_titles = set()
+        unique_news = []
+        for n in news_data:
+            if n[0] not in seen_titles:
+                seen_titles.add(n[0])
+                unique_news.append(n)
+
+        dates = sorted(list(set(n[2] for n in unique_news)), reverse=True)
         for d in dates:
-            day_items = [n for n in news_data if n[2] == d and not is_filtered(n[0])]
+            day_items = [n for n in unique_news if n[2] == d and not is_filtered(n[0])]
             if day_items:
                 with st.expander(f"📅 Current Affairs for {d} ({len(day_items)} items)"):
-                    for n in day_items:
-                        st.markdown(f"**• {n[0]}**")
+                    for idx, n in enumerate(day_items):
+                        title   = n[0]
+                        content = n[1] if len(n) > 1 else ""
+                        url     = n[3] if len(n) > 3 else ""
+                        
+                        # Unique key for this news item
+                        news_key = f"{d}_{idx}_{title[:30]}"
+                        expanded_key = f"news_expanded_{news_key}"
+                        
+                        # News item header with button
+                        col_title, col_btn = st.columns([8, 1])
+                        with col_title:
+                            st.markdown(f"**• {title}**")
+                        with col_btn:
+                            if st.button(
+                                "🔍" if not st.session_state.get(expanded_key, False) else "✕",
+                                key=f"btn_{news_key}",
+                                help="View summary" if not st.session_state.get(expanded_key, False) else "Close summary"
+                            ):
+                                st.session_state[expanded_key] = not st.session_state.get(expanded_key, False)
+                                safe_rerun()
+                        
+                        # ── Display Summary if Expanded ────────────────
+                        if st.session_state.get(expanded_key, False):
+                            with st.container():
+                                st.markdown(
+                                    f'<div style="background:#1e1e2e;border:2px solid #7c3aed;border-radius:12px;'
+                                    f'padding:18px 20px;margin:10px 0;color:#e2e8f0;">'
+                                    f'<p style="color:#a78bfa;margin:0 0 8px 0;font-size:13px;font-weight:600;'
+                                    f'text-transform:uppercase;letter-spacing:0.5px;">📊 UPSC Analysis</p>'
+                                    f'</div>',
+                                    unsafe_allow_html=True
+                                )
+                                
+                                # ── Generate or retrieve summary ────────
+                                if title not in st.session_state["news_summaries"]:
+                                    with st.spinner("🤖 Generating UPSC-focused analysis..."):
+                                        raw = content.strip() if content and content.strip() else title
+                                        prompt = f"""You are an expert UPSC coach and current affairs analyst. Analyse the following news article and present a structured UPSC-focused summary using the exact format below. Be concise, factual, and exam-relevant.
+
+---
+**NEWS TITLE:** {title}
+
+**CONTENT:** {raw}
+---
+
+Provide the analysis in this exact structured format:
+
+## 📌 One-Liner (What happened — one crisp sentence)
+
+## 🏛️ Relevant Articles / Constitutional Provisions / Acts
+- List any relevant Articles of the Constitution, Acts of Parliament, International agreements, or Government schemes directly related to this news.
+
+## 📖 Background
+- Key historical context or background that a UPSC aspirant must know about this topic.
+- Include GS Paper relevance (GS1 / GS2 / GS3 / GS4 / Mains Essay).
+
+## ⭐ Important Points (Key Facts for Prelims & Mains)
+- Bullet-point the most important factual information, dates, names, statistics, or policy details.
+- Include topics this connects to (e.g., federalism, environment, economy, governance).
+
+## ⚠️ Problems / Challenges
+- What are the core issues, challenges, or concerns highlighted by this news?
+
+## ✅ Solutions / Government Response / Way Forward
+- What steps have been taken or recommended? Policy measures, government schemes, expert recommendations.
+
+## 🔚 Conclusion
+- One crisp closing statement on why this matters for India's development or UPSC perspective.
+
+Be factual, structured, and UPSC Prelims + Mains focused. Avoid unnecessary padding."""
+                                        summary = ask_llm(prompt)
+                                        st.session_state["news_summaries"][title] = summary
+                                        
+                                        # ── Save summary to database ────────
+                                        summary_content = f"**TITLE:** {title}\n\n{summary}"
+                                        if url:
+                                            summary_content += f"\n\n**SOURCE:** {url}"
+                                        save_item("CA News Summary", summary_content)
+                                
+                                # ── Display the summary ────────────────
+                                st.markdown(st.session_state["news_summaries"][title])
+                                
+                                # ── Show source URL ────────────────────
+                                if url:
+                                    st.markdown(
+                                        f'<div style="margin-top:12px;padding:10px 14px;background:#16162a;'
+                                        f'border-radius:8px;border:1px solid #312e81;">'
+                                        f'🔗 <strong>Source:</strong> <a href="{url}" target="_blank" style="color:#a78bfa;word-break:break-all;">'
+                                        f'{url[:80]}...</a></div>',
+                                        unsafe_allow_html=True
+                                    )
+                            
+                            st.markdown("---")
     else:
         st.info("No Current Affairs data available. Please refresh to fetch current affairs.")
 
-    # ── Retention Rules (Moved to Bottom) ─────────────────────────────────────
+    # ── Bottom Controls: Retention Rules + Manage Filters ──────────────────────
     st.markdown("---")
     username = st.session_state["username"]
     current_retention = get_retention(username)
     
-    col_ret_label, col_ret_input, col_ret_apply = st.columns([1.5, 1, 1.5])
+    col_ret_label, col_ret_input, col_ret_apply, col_filter = st.columns([1.2, 0.8, 0.9, 1.1])
+    
     with col_ret_label:
-        st.markdown('<p style="text-align:right; margin-top:10px; font-weight:600; color:#c4b5fd;">Data Retention Settings:</p>', unsafe_allow_html=True)
+        st.markdown('<p style="text-align:right; margin-top:10px; font-weight:600; color:#c4b5fd; font-size:13px;">Retention:</p>', unsafe_allow_html=True)
     with col_ret_input:
-        retention_days = st.number_input("Retention Days", min_value=1, max_value=365, value=current_retention, label_visibility="collapsed")
+        retention_days = st.number_input("Days", min_value=1, max_value=365, value=current_retention, label_visibility="collapsed")
         if retention_days != current_retention:
             set_retention(username, retention_days)
             st.toast(f"⚙️ Retention set to {retention_days} days")
     with col_ret_apply:
-        if st.button("🧹 Apply Rules", use_container_width=True, help="Delete data older than retention period"):
+        if st.button("🧹 Apply", use_container_width=True, help="Delete data older than retention period"):
             clean_old(days=retention_days)
             st.success(f"🗑️ Cleaned data older than {retention_days} days!")
+    
+    with col_filter:
+        if st.button("🔧 Manage Filters", use_container_width=True, key="btn_manage_filters_bottom"):
+            st.session_state["show_filter_panel"] = not st.session_state.get("show_filter_panel", False)
+            safe_rerun()
+    
+    # ── Filter Management Panel (Compact) ─────────────────────────────────────
+    if st.session_state.get("show_filter_panel", False):
+        st.markdown(
+            f'<div style="background:#16162a;border:1px solid #312e81;border-radius:10px;'
+            f'padding:14px 16px;margin-top:12px;">'
+            f'<p style="color:#34d399;margin:0 0 8px 0;font-weight:600;font-size:13px;"><span style="color:#34d399;">⭐</span> Hide headlines with these words:</p>',
+            unsafe_allow_html=True
+        )
+        
+        existing_filters = get_ca_filters()
+        if existing_filters:
+            tags_html = ""
+            for fid, word in existing_filters:
+                tags_html += f'<span class="filter-tag">{word}<span class="tag-x" title="Remove" onclick="alert(\'Use remove button below\')" style="cursor:pointer;">✕</span></span>'
+            st.markdown(f'<div>{tags_html}</div>', unsafe_allow_html=True)
+            
+            col_rm, col_add = st.columns(2)
+            with col_rm:
+                filter_options = [f"{word} (id:{fid})" for fid, word in existing_filters]
+                to_remove = st.selectbox("Remove:", [""] + filter_options, key="rm_filter_compact", label_visibility="collapsed")
+                if to_remove and st.button("Remove", key="btn_rm_filter_compact", use_container_width=True):
+                    fid = int(to_remove.split("id:")[1].rstrip(")"))
+                    delete_ca_filter(fid)
+                    st.success("Removed!")
+                    safe_rerun()
+            with col_add:
+                new_word = st.text_input("Add word:", label_visibility="collapsed", key="new_filter_compact", placeholder="e.g., cricket")
+                if st.button("➕ Add", key="btn_add_filter_compact", use_container_width=True):
+                    if new_word.strip():
+                        add_ca_filter(new_word.strip())
+                        st.success(f"Added!")
+                        safe_rerun()
+        else:
+            st.write("No filter words added yet.")
+            new_word = st.text_input("Add filter word:", key="new_filter_panel", placeholder="e.g., cricket")
+            if st.button("➕ Add Filter", key="btn_add_first_filter", use_container_width=True):
+                if new_word.strip():
+                    add_ca_filter(new_word.strip())
+                    st.success(f"Added filter: '{new_word.strip()}'")
+                    safe_rerun()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -379,51 +514,586 @@ elif page == "PDF Quiz":
 # ══════════════════════════════════════════════════════════════════════════════
 #   PYQ PREDICTOR
 # ══════════════════════════════════════════════════════════════════════════════
-elif page == "PYQ Predictor":
-    if st.button("Predict PYQ Topics"):
+elif page == "Practice":
+    st.subheader("📜 PYQ Practice — Prelims & Mains")
+    st.caption("Generate Previous Year Questions linked to today's current affairs. Prelims as a quiz, Mains with model answers.")
+
+    # ── Session state init ────────────────────────────────────────────────────
+    if "pyq_prelims" not in st.session_state:
+        st.session_state["pyq_prelims"] = None
+    if "pyq_mains" not in st.session_state:
+        st.session_state["pyq_mains"] = None
+    if "pyq_submitted" not in st.session_state:
+        st.session_state["pyq_submitted"] = False
+    if "pyq_user_answers" not in st.session_state:
+        st.session_state["pyq_user_answers"] = {}
+
+    # ── Generate button ───────────────────────────────────────────────────────
+    if st.button("🚀 Generate PYQ Practice Set", type="primary", use_container_width=True):
         data_news = [x[0] for x in get_news()]
-        out = predict(data_news)
-        st.write(out)
-        save_item("PYQ Predictor", out)
-        pdf = generate_pdf(out)
-        st.download_button("Download PDF", open(pdf, "rb"), file_name="pyq.pdf")
+        if not data_news:
+            st.warning("No current affairs data. Please refresh the feed first.")
+        else:
+            with st.spinner("🤖 AI is analyzing current affairs and predicted PYQs..."):
+                result = generate_full_pyq_session(data_news)
+                prelims = result.get("prelims", [])
+                mains = result.get("mains", [])
 
-    # ── Previous PYQ with ✕ close ─────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("📂 Previous PYQ Predictions")
-    saved_items = get_saved_items()
-    pyq_items = [item for item in saved_items if item[1] == "PYQ Predictor"]
+            if not prelims and not mains:
+                st.error("AI failed to generate questions. This might be an API limit. Try again in a moment.")
+            else:
+                st.session_state["pyq_prelims"] = prelims
+                st.session_state["pyq_mains"] = mains
+                st.session_state["pyq_submitted"] = False
+                st.session_state["pyq_user_answers"] = {}
 
-    if pyq_items:
-        options = [f"PYQ – {item[3]}" for item in pyq_items]
-        selected = st.selectbox("Select a previous prediction", [""] + options, key="sel_pyq")
-
-        if selected:
-            idx = options.index(selected)
-            item_id = pyq_items[idx][0]
-            content = pyq_items[idx][2]
-
-            col_content, col_close = st.columns([20, 1])
-            with col_close:
-                st.button("✕", key=f"x_pyq_{item_id}", help="Close", on_click=clear_state, args=("sel_pyq",))
-            with col_content:
-                st.text_area("Content", content, height=280, key=f"ta_pyq_{item_id}")
-
-            if st.button("🗑️ Remove from Database", key=f"del_pyq_{item_id}"):
-                st.session_state[f"confirm_del_pyq_{item_id}"] = True
+                # Save for history
+                save_content = f"Session Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                save_content += f"=== PRELIMS ({len(prelims)}) ===\n"
+                for i, pq in enumerate(prelims):
+                    save_content += f"Q{i+1}. [{pq.get('year','')}] {pq['question']}\nAns: {pq.get('correct_answer','')}\n\n"
+                save_content += f"=== MAINS ({len(mains)}) ===\n"
+                for i, mq in enumerate(mains):
+                    save_content += f"Q{i+1}. [{mq.get('year','')} | {mq.get('paper','')}] {mq['question']}\n\n"
+                
+                save_item("Practice", save_content)
+                st.success(f"Generated {len(prelims)} Prelims and {len(mains)} Mains questions!")
                 safe_rerun()
-            if st.session_state.get(f"confirm_del_pyq_{item_id}"):
-                st.warning("Are you sure?")
-                c1, c2 = st.columns(2)
-                if c1.button("Yes", key=f"yes_pyq_{item_id}"):
-                    delete_saved_item(item_id)
-                    st.session_state[f"confirm_del_pyq_{item_id}"] = False
+
+    # ── TABS: Prelims | Mains ─────────────────────────────────────────────────
+    tab_prelims, tab_mains, tab_history = st.tabs(["📝 Prelims PYQ Quiz", "✍️ Mains PYQ Practice", "📂 History"])
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #   PRELIMS TAB
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    with tab_prelims:
+        prelims_data = st.session_state["pyq_prelims"]
+
+        if prelims_data:
+            st.markdown(f"**{len(prelims_data)} questions generated** — Answer all, then submit to see explanations.")
+            st.markdown("---")
+
+            if not st.session_state["pyq_submitted"]:
+                # ── Quiz Mode (answers hidden) ────────────────────────────────
+                st.markdown("### Answer the following questions:")
+                with st.form("pyq_prelims_form"):
+                    for i, pq in enumerate(prelims_data):
+                        year_badge = pq.get("year", "")
+                        badge_color = "#34d399" if year_badge != "Predicted" else "#fbbf24"
+                        
+                        st.markdown(
+                            f'<div style="background:#16162a;border-left:3px solid {badge_color};'
+                            f'padding:12px 14px;margin:12px 0 8px 0;border-radius:4px;">'
+                            f'<div style="margin-bottom:6px;">'
+                            f'<span style="background:{badge_color};color:#000;padding:2px 8px;'
+                            f'border-radius:6px;font-size:11px;font-weight:600;">{year_badge}</span>'
+                            f'</div>'
+                            f'<p style="color:#e2e8f0;margin:0;font-size:15px;font-weight:600;">Q{i+1}. {pq["question"]}</p>'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+                        
+                        opts = pq["options"]
+                        option_labels = []
+                        for letter in ["A", "B", "C", "D"]:
+                            opt_text = opts.get(letter, "")
+                            # Truncate long options for display
+                            if len(opt_text) > 80:
+                                opt_text = opt_text[:77] + "..."
+                            option_labels.append(f"{letter}) {opt_text}")
+                        
+                        sel = st.radio(
+                            "Select your answer:",
+                            option_labels,
+                            key=f"pyq_ans_{i}",
+                            index=None,
+                            label_visibility="collapsed"
+                        )
+                        st.divider()
+
+                    submitted = st.form_submit_button("📩 Submit Quiz", type="primary", use_container_width=True)
+                    if submitted:
+                        answers = {}
+                        for i in range(len(prelims_data)):
+                            sel = st.session_state.get(f"pyq_ans_{i}")
+                            if sel:
+                                answers[i] = sel[0]  # Extract letter (A/B/C/D)
+                            else:
+                                answers[i] = None
+                        st.session_state["pyq_user_answers"] = answers
+                        st.session_state["pyq_submitted"] = True
+                        safe_rerun()
+
+            else:
+                # ── Review Mode (answers + explanations shown) ────────────────
+                user_answers = st.session_state["pyq_user_answers"]
+                total = len(prelims_data)
+                correct_count = 0
+                attempted_count = 0
+
+                for i, pq in enumerate(prelims_data):
+                    user_ans = user_answers.get(i)
+                    correct_ans = pq["correct_answer"]
+                    year_badge = pq.get("year", "")
+
+                    is_correct = user_ans == correct_ans
+                    if user_ans:
+                        attempted_count += 1
+                    if is_correct:
+                        correct_count += 1
+
+                    # Status icon
+                    if user_ans is None:
+                        status_icon = "⚪"
+                        status_text = "Not Attempted"
+                        border_color = "#6b7280"
+                    elif is_correct:
+                        status_icon = "✅"
+                        status_text = "Correct"
+                        border_color = "#34d399"
+                    else:
+                        status_icon = "❌"
+                        status_text = f"Wrong (You: {user_ans})"
+                        border_color = "#f87171"
+
+                    badge_color = "#34d399" if year_badge != "Predicted" else "#fbbf24"
+
+                    st.markdown(
+                        f'<div style="border-left:4px solid {border_color}; padding:12px 16px; '
+                        f'margin-bottom:8px; background:#16162a; border-radius:8px;">'
+                        f'<span style="background:{badge_color};color:#000;padding:2px 10px;'
+                        f'border-radius:10px;font-size:12px;font-weight:600;margin-right:8px;">{year_badge}</span>'
+                        f'{status_icon} {status_text}'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+
+                    with st.expander(f"Q{i+1}. {pq['question'][:100]}...", expanded=False):
+                        st.markdown(f"**Full Question:** {pq['question']}")
+                        st.markdown("")
+
+                        opts = pq["options"]
+                        opt_expl = pq.get("option_explanations", {})
+
+                        for letter in ["A", "B", "C", "D"]:
+                            opt_text = opts.get(letter, "")
+                            expl = opt_expl.get(letter, "")
+
+                            if letter == correct_ans:
+                                icon = "✅"
+                                bg = "#0f3d2c"
+                                bdr = "#34d399"
+                                text_color = "#86efac"
+                            elif letter == user_ans and letter != correct_ans:
+                                icon = "❌"
+                                bg = "#3d1519"
+                                bdr = "#f87171"
+                                text_color = "#fca5a5"
+                            else:
+                                icon = "⚪"
+                                bg = "#1a1a2e"
+                                bdr = "#374151"
+                                text_color = "#d1d5db"
+
+                            st.markdown(
+                                f'<div style="background:{bg}; border:2px solid {bdr}; border-radius:10px; '
+                                f'padding:14px 16px; margin:10px 0;">'
+                                f'<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">'
+                                f'<div style="flex:1;">'
+                                f'<p style="color:{text_color}; font-weight:600; font-size:15px; margin:0 0 6px 0;">{icon} <strong>{letter})</strong> {opt_text}</p>'
+                                f'<p style="color:#cbd5e1; font-size:13px; margin:0; line-height:1.5;">{expl}</p>'
+                                f'</div>'
+                                f'</div>'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
+
+                        overall_expl = pq.get("explanation", "")
+                        if overall_expl:
+                            st.markdown(
+                                f'<div style="background:#1a2236; border-left:4px solid #818cf8; '
+                                f'padding:14px 18px; border-radius:4px 10px 10px 4px; margin-top:10px;">'
+                                f'<h5 style="color:#818cf8; margin:0 0 6px 0; font-size:14px; text-transform:uppercase; letter-spacing:0.5px;">📖 Detailed Analysis</h5>'
+                                f'<p style="color:#e2e8f0; font-size:14px; margin:0; line-height:1.5;">{overall_expl}</p>'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
+                        
+                        st.markdown(
+                            f'<div style="margin-top:12px; font-size:13px; color:#94a3b8; '
+                            f'background:#16162a; padding:12px; border-radius:6px;">'
+                            f'🏷️ <strong>Year:</strong> {year_badge} | '
+                            f'🎯 <strong>Correct Answer:</strong> <span style="color:#34d399; font-weight:700;">{correct_ans}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+
+                    st.markdown("---")
+
+                # ── Score Summary ─────────────────────────────────────────────
+                wrong_count = attempted_count - correct_count
+                accuracy = round(correct_count / attempted_count * 100, 1) if attempted_count > 0 else 0
+                marks = round(correct_count * 2 - wrong_count * 0.66, 2)
+                acc_col = "#34d399" if accuracy >= 70 else ("#fbbf24" if accuracy >= 50 else "#f87171")
+
+                st.markdown(
+                    f'<div style="background: linear-gradient(135deg, #1e1e3f 0%, #111122 100%); '
+                    f'border: 1px solid #7c3aed; border-radius: 16px; padding: 24px; '
+                    f'margin: 20px 0; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);">'
+                    f'<h3 style="color:#ffffff; margin-top:0; font-size:20px; border-bottom:1px solid #312e81; padding-bottom:12px;">📊 Result Performance Score</h3>'
+                    f'<div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-top:16px;">'
+                    f'<div>'
+                    f'<p style="color:#94a3b8; font-size:12px; margin:0; text-transform:uppercase;">Accuracy</p>'
+                    f'<p style="color:{acc_col}; font-size:32px; font-weight:800; margin:0;">{accuracy}%</p>'
+                    f'</div>'
+                    f'<div>'
+                    f'<p style="color:#94a3b8; font-size:12px; margin:0; text-transform:uppercase;">Total Marks</p>'
+                    f'<p style="color:#ffffff; font-size:32px; font-weight:800; margin:0;">{marks}</p>'
+                    f'</div>'
+                    f'</div>'
+                    f'<div style="margin-top:20px; font-size:14px; border-top:1px solid #312e81; padding-top:16px;">'
+                    f'<span style="color:#cbd5e1; margin-right:20px;">Questions: <strong>{total}</strong></span>'
+                    f'<span style="color:#34d399; margin-right:20px;">Correct: <strong>{correct_count}</strong></span>'
+                    f'<span style="color:#f87171;">Wrong: <strong>{wrong_count}</strong></span>'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+
+                # ── Retry button ──────────────────────────────────────────────
+                if st.button("🔄 Retry / Generate New Set", key="pyq_retry"):
+                    st.session_state["pyq_prelims"] = None
+                    st.session_state["pyq_submitted"] = False
+                    st.session_state["pyq_user_answers"] = {}
                     safe_rerun()
-                if c2.button("No", key=f"no_pyq_{item_id}"):
-                    st.session_state[f"confirm_del_pyq_{item_id}"] = False
+
+                # Save result
+                save_result(("PYQ_Prelims", total, attempted_count, correct_count, wrong_count, accuracy, marks))
+
+        else:
+            st.info("Click **Generate PYQ Practice Set** above to start.")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #   MAINS TAB
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    with tab_mains:
+        mains_data = st.session_state["pyq_mains"]
+
+        if mains_data:
+            st.markdown(f"**{len(mains_data)} Mains questions generated** — Click *Show Model Answer* to reveal the ideal answer, or upload your handwritten answer for AI evaluation.")
+            st.markdown("---")
+
+            for i, mq in enumerate(mains_data):
+                year_badge = mq.get("year", "")
+                paper_badge = mq.get("paper", "")
+                badge_color = "#34d399" if year_badge != "Predicted" else "#fbbf24"
+                paper_color = "#818cf8"
+
+                st.markdown(
+                    f'<div style="background:#16162a;border:1px solid #312e81;border-radius:12px;'
+                    f'padding:18px 22px;margin-bottom:6px;">'
+                    f'<div style="margin-bottom:8px;">'
+                    f'<span style="background:{badge_color};color:#000;padding:2px 10px;'
+                    f'border-radius:10px;font-size:12px;font-weight:600;margin-right:6px;">{year_badge}</span>'
+                    f'<span style="background:#2d1b6b;color:{paper_color};padding:2px 10px;'
+                    f'border-radius:10px;font-size:12px;font-weight:600;">{paper_badge}</span>'
+                    f'</div>'
+                    f'<p style="color:#e2e8f0;font-size:15px;font-weight:500;margin:0;">'
+                    f'<strong>Q{i+1}.</strong> {mq["question"]}</p>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+
+                # ── Action buttons row ────────────────────────────────────────
+                col_ma, col_upload = st.columns(2)
+
+                # Show Model Answer toggle
+                ma_key = f"show_ma_{i}"
+                with col_ma:
+                    if st.button(
+                        f"📖 Show Model Answer" if not st.session_state.get(ma_key) else f"🔒 Hide Model Answer",
+                        key=f"btn_ma_{i}", use_container_width=True
+                    ):
+                        st.session_state[ma_key] = not st.session_state.get(ma_key, False)
+                        safe_rerun()
+
+                # Submit Answer toggle
+                sa_key = f"show_upload_{i}"
+                with col_upload:
+                    if st.button(
+                        f"📤 Submit My Answer" if not st.session_state.get(sa_key) else f"🔒 Hide Upload",
+                        key=f"btn_sa_{i}", use_container_width=True
+                    ):
+                        st.session_state[sa_key] = not st.session_state.get(sa_key, False)
+                        safe_rerun()
+
+                # ── Model Answer Panel ────────────────────────────────────────
+                if st.session_state.get(ma_key):
+                    model_ans = mq.get("model_answer", "")
+                    
+                    # Parse model answer to extract sections
+                    intro = ""
+                    key_points = []
+                    conclusion = ""
+                    
+                    if model_ans:
+                        # Try to extract structured sections
+                        if "**Introduction:**" in model_ans:
+                            parts = model_ans.split("**Introduction:**")
+                            if len(parts) > 1:
+                                intro_text = parts[1]
+                                if "**Key Points:**" in intro_text:
+                                    intro = intro_text.split("**Key Points:**")[0].strip()
+                                elif "**Conclusion:**" in intro_text:
+                                    intro = intro_text.split("**Conclusion:**")[0].strip()
+                                else:
+                                    intro = intro_text[:300].strip()
+                        
+                        if "**Key Points:**" in model_ans:
+                            kp_section = model_ans.split("**Key Points:**")[1]
+                            if "**Conclusion:**" in kp_section:
+                                kp_text = kp_section.split("**Conclusion:**")[0]
+                            else:
+                                kp_text = kp_section
+                            
+                            # Extract bullet points
+                            for line in kp_text.split("\n"):
+                                line = line.strip()
+                                if line and (line.startswith("-") or line.startswith("•") or line[0].isdigit()):
+                                    clean_line = line.lstrip("-•0123456789) ").strip()
+                                    if clean_line:
+                                        key_points.append(clean_line)
+                        
+                        if "**Conclusion:**" in model_ans:
+                            conc_text = model_ans.split("**Conclusion:**")[1]
+                            conclusion = conc_text.strip()[:200]
+                    
+                    # Display with better formatting
+                    st.markdown(
+                        f'<div style="background:#0f1729;border:2px solid #7c3aed;border-radius:12px;'
+                        f'padding:24px;margin:8px 0 20px 0;">'
+                        f'<h4 style="color:#a78bfa;margin:0 0 16px 0; font-size:18px;"><span style="color:#fbbf24;">📝</span> Model Answer</h4>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                    
+                    # Introduction
+                    if intro:
+                        st.markdown(
+                            f'<div style="background:#16162a;border-left:4px solid #818cf8;'
+                            f'padding:14px 16px;margin-bottom:12px;border-radius:4px;">'
+                            f'<p style="color:#cbd5e1;margin:0;font-size:14px;line-height:1.5;"><strong style="color:#818cf8;">Introduction:</strong> {intro}</p>'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+                    
+                    # Key Points - Highlighted separately
+                    if key_points:
+                        st.markdown(
+                            f'<div style="background:#1a1a35;border-left:4px solid #34d399;'
+                            f'padding:16px;margin-bottom:12px;border-radius:4px;">'
+                            f'<p style="color:#34d399;margin:0 0 12px 0;font-size:15px;font-weight:600;'
+                            f'text-transform:uppercase;letter-spacing:0.5px;">⭐ Important Points to Remember:</p>',
+                            unsafe_allow_html=True
+                        )
+                        for idx, point in enumerate(key_points[:5], 1):  # Limit to 5 points
+                            st.markdown(
+                                f'<div style="margin:8px 0;padding-left:12px;border-left:2px solid #34d399;">'
+                                f'<p style="color:#e2e8f0;margin:0;font-size:14px;"><strong>{idx}.</strong> {point}</p>'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Conclusion
+                    if conclusion:
+                        st.markdown(
+                            f'<div style="background:#16162a;border-left:4px solid #f59e0b;'
+                            f'padding:14px 16px;margin-bottom:12px;border-radius:4px;">'
+                            f'<p style="color:#cbd5e1;margin:0;font-size:14px;line-height:1.5;"><strong style="color:#f59e0b;">Conclusion:</strong> {conclusion}</p>'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+                    
+                    # Full answer if different from parsed sections
+                    if model_ans and not (intro or key_points or conclusion):
+                        with st.expander("📖 Full Model Answer", expanded=False):
+                            st.markdown(model_ans)
+
+
+                # ── Answer Upload & Evaluation Panel ──────────────────────────
+                if st.session_state.get(sa_key):
+                    eval_key = f"eval_result_{i}"
+
+                    st.markdown(
+                        f'<div style="background:#1a1a2e;border:2px solid #065f46;border-radius:10px;'
+                        f'padding:16px 20px;margin:8px 0 12px 0;color:#d1d5db;">'
+                        f'<h4 style="color:#34d399;margin:0 0 8px 0;"><span style="color:#34d399;">📤</span> Submit Your Answer for Q{i+1}</h4>'
+                        f'<p style="font-size:14px;color:#cbd5e1;margin:0;line-height:1.4;">'
+                        f'Upload a photo/scan of your handwritten answer OR type your response below. '
+                        f'Our AI will evaluate it against the model answer.</p>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+
+                    col_img, col_type = st.columns([1, 1])
+                    
+                    # Image upload
+                    with col_img:
+                        st.subheader("📸 Upload Image", divider=False)
+                        uploaded_img = st.file_uploader(
+                            "Upload scanned/photo answer",
+                            type=["png", "jpg", "jpeg", "webp"],
+                            key=f"img_upload_{i}",
+                            label_visibility="collapsed"
+                        )
+
+                    # Or type answer
+                    with col_type:
+                        st.subheader("⌨️ Type Answer", divider=False)
+                        typed_answer = st.text_area(
+                            "Type your answer here",
+                            height=150,
+                            key=f"typed_ans_{i}",
+                            placeholder="Write your complete answer here...",
+                            label_visibility="collapsed"
+                        )
+
+                    st.markdown("")
+                    if st.button(f"🤖 Evaluate My Answer for Q{i+1}", key=f"eval_btn_{i}", type="primary", use_container_width=True):
+                        question_text = mq["question"]
+                        model_answer = mq.get("model_answer", "")
+
+                        eval_prompt = f"""You are a senior UPSC Mains answer evaluator and mentor. Evaluate the student's answer for the following question using UPSC Mains evaluation criteria.
+
+**QUESTION:** {question_text}
+
+**MODEL ANSWER (for reference):** {model_answer}
+
+Evaluate the student's answer and provide a detailed analysis in this EXACT format:
+
+## 📊 Overall Score: ___ / 10
+
+## ✅ Strengths
+- What the student did well
+- Good points, examples, or structure used
+
+## ❌ Weaknesses & Mistakes
+- What was missing or incorrect
+- Factual errors, if any
+- Important points that were skipped
+
+## 📐 Structure & Presentation
+- Did the answer have Introduction, Body, Conclusion?
+- Was the answer well-organized with headings/sub-points?
+- Was it within the ideal word limit (250 words for 10-markers, 150 for 5-markers)?
+
+## 📚 Content & Knowledge
+- Depth of knowledge demonstrated
+- Use of facts, data, examples, case studies, committee reports
+- Constitutional/legal provisions mentioned
+
+## 🔗 Answer vs Model Answer Comparison
+- Key points present in model answer but missing in student's answer
+- Any extra good points the student covered
+
+## 🎯 Improvement Tips
+- Specific, actionable tips for next time
+- What to study/revise for this topic
+- How to improve the answer structure
+
+## 📝 Rewritten Key Lines (if needed)
+- Suggest 2-3 better-worded sentences the student could use
+
+Be strict but encouraging. This is UPSC-level evaluation."""
+
+                        if uploaded_img:
+                            # Process image via vision model
+                            img_bytes = uploaded_img.read()
+                            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                            mime = uploaded_img.type or "image/png"
+
+                            vision_prompt = f"""First, carefully read and extract ALL the handwritten/printed text from this image. This is a student's answer to a UPSC Mains exam question.
+
+After extracting the text, evaluate it.
+
+{eval_prompt}
+
+**STUDENT'S ANSWER:** [extracted from the image above]"""
+
+                            with st.spinner("🤖 Reading your answer and evaluating..."):
+                                result = ask_llm_vision(vision_prompt, img_b64, mime)
+                            st.session_state[eval_key] = result
+                            safe_rerun()
+
+                        elif typed_answer.strip():
+                            full_prompt = eval_prompt + f"\n\n**STUDENT'S ANSWER:**\n{typed_answer.strip()}"
+                            with st.spinner("🤖 Evaluating your answer..."):
+                                result = ask_llm(full_prompt)
+                            st.session_state[eval_key] = result
+                            safe_rerun()
+
+                        else:
+                            st.warning("Please upload an image or type your answer first.")
+
+                    # Show evaluation result
+                    if eval_key in st.session_state:
+                        st.markdown(
+                            f'<div style="background:#0f2b1d;border:1px solid #065f46;border-radius:10px;'
+                            f'padding:18px 22px;margin:10px 0;color:#d1fae5;">'
+                            f'<h4 style="color:#34d399;margin-top:0;">🤖 AI Evaluation Report — Q{i+1}</h4>'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(st.session_state[eval_key])
+
+                        # Clear evaluation
+                        if st.button("🗑️ Clear Evaluation", key=f"clear_eval_{i}"):
+                            del st.session_state[eval_key]
+                            safe_rerun()
+
+                st.markdown("---")
+        else:
+            st.info("Click **Generate PYQ Practice Set** above to start.")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #   HISTORY TAB
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    with tab_history:
+        st.subheader("📂 Previous PYQ Sessions")
+        saved_items = get_saved_items()
+        pyq_items = [item for item in saved_items if item[1] == "PYQ Predictor"]
+
+        if pyq_items:
+            options = [f"PYQ Session – {item[3]}" for item in pyq_items]
+            selected = st.selectbox("Select a previous session", [""] + options, key="sel_pyq")
+
+            if selected:
+                idx = options.index(selected)
+                item_id = pyq_items[idx][0]
+                content = pyq_items[idx][2]
+
+                col_content, col_close = st.columns([20, 1])
+                with col_close:
+                    st.button("✕", key=f"x_pyq_{item_id}", help="Close", on_click=clear_state, args=("sel_pyq",))
+                with col_content:
+                    st.text_area("Content", content, height=400, key=f"ta_pyq_{item_id}")
+
+                if st.button("🗑️ Remove from Database", key=f"del_pyq_{item_id}"):
+                    st.session_state[f"confirm_del_pyq_{item_id}"] = True
                     safe_rerun()
-    else:
-        st.info("No previous PYQ Predictor items found.")
+                if st.session_state.get(f"confirm_del_pyq_{item_id}"):
+                    st.warning("Are you sure?")
+                    c1, c2 = st.columns(2)
+                    if c1.button("Yes", key=f"yes_pyq_{item_id}"):
+                        delete_saved_item(item_id)
+                        st.session_state[f"confirm_del_pyq_{item_id}"] = False
+                        safe_rerun()
+                    if c2.button("No", key=f"no_pyq_{item_id}"):
+                        st.session_state[f"confirm_del_pyq_{item_id}"] = False
+                        safe_rerun()
+        else:
+            st.info("No previous PYQ sessions found.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

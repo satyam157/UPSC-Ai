@@ -21,11 +21,13 @@ def fetch_news():
 
         for e in feed.entries[:15]:
             title = e.title
+            link  = getattr(e, "link", "")
 
             if is_relevant(title):
                 news.append({
                     "title": title,
-                    "content": e.summary,
+                    "content": getattr(e, "summary", ""),
+                    "link": link,
                     "date": today
                 })
 

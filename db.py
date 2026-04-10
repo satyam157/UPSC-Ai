@@ -6,9 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-conn = None
-
 def get_connection():
+    """Get a fresh database connection with proper error handling."""
     try:
         try:
             if "DATABASE_URL" in st.secrets:
@@ -32,119 +31,175 @@ def get_connection():
         print(f"Database connection failed: {e}")
         return None
 
-try:
+def _safe_rollback(connection):
+    """Safely rollback a connection if still open."""
+    if connection:
+        try:
+            if not connection.closed:
+                connection.rollback()
+        except Exception:
+            pass
+
+def _init_schema(connection):
+    """Initialize database schema."""
+    if not connection:
+        return
+    try:
+        with connection.cursor() as cur:
+            cur.execute("SET statement_timeout = 60000")
+            
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS news (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT UNIQUE,
+                    content TEXT,
+                    url TEXT,
+                    date TEXT
+                )
+            """)
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS news_title_uq ON news (title)")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS questions (
+                    id SERIAL PRIMARY KEY,
+                    question TEXT
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS results (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT, 
+                    total INT, 
+                    attempted INT,
+                    correct INT, 
+                    wrong INT, 
+                    accuracy REAL, 
+                    marks REAL
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS saved_items (
+                    id SERIAL PRIMARY KEY,
+                    item_type TEXT,
+                    content TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    username TEXT PRIMARY KEY,
+                    retention_days INT
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ca_filters (
+                    id SERIAL PRIMARY KEY,
+                    word TEXT UNIQUE,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ai_reports (
+                    id SERIAL PRIMARY KEY,
+                    report_type TEXT,
+                    period_label TEXT,
+                    content TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS test_papers (
+                    id SERIAL PRIMARY KEY,
+                    test_name TEXT,
+                    test_date DATE DEFAULT CURRENT_DATE,
+                    total_questions INT,
+                    attempted INT,
+                    not_attempted INT,
+                    guessed_correct INT,
+                    guessed_incorrect INT,
+                    carelessness_notes TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        connection.commit()
+    except Exception as e:
+        _safe_rollback(connection)
+        print(f"Schema initialization error: {e}")
+
+def get_conn():
+    """Get a fresh database connection, initializing schema if needed."""
     conn = get_connection()
-    if conn:
+    if not conn:
+        return None
+    try:
+        # Test connection is alive
         with conn.cursor() as c:
-            c.execute("""
-            CREATE TABLE IF NOT EXISTS news (
-                id SERIAL PRIMARY KEY,
-                title TEXT, 
-                content TEXT, 
-                date TEXT
-            )
-            """)
-
-            c.execute("""
-            CREATE TABLE IF NOT EXISTS questions (
-                id SERIAL PRIMARY KEY,
-                question TEXT
-            )
-            """)
-
-            c.execute("""
-            CREATE TABLE IF NOT EXISTS results (
-                id SERIAL PRIMARY KEY,
-                name TEXT, 
-                total INT, 
-                attempted INT,
-                correct INT, 
-                wrong INT, 
-                accuracy REAL, 
-                marks REAL
-            )
-            """)
-
-            c.execute("""
-            CREATE TABLE IF NOT EXISTS saved_items (
-                id SERIAL PRIMARY KEY,
-                item_type TEXT,
-                content TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """)
-
-            c.execute("""
-            CREATE TABLE IF NOT EXISTS user_settings (
-                username TEXT PRIMARY KEY,
-                retention_days INT
-            )
-            """)
-
-            # CA Filter words table
-            c.execute("""
-            CREATE TABLE IF NOT EXISTS ca_filters (
-                id SERIAL PRIMARY KEY,
-                word TEXT UNIQUE,
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """)
-
-            # AI Analysis Reports table
-            c.execute("""
-            CREATE TABLE IF NOT EXISTS ai_reports (
-                id SERIAL PRIMARY KEY,
-                report_type TEXT,
-                period_label TEXT,
-                content TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """)
-
-            # Test Paper Analysis table
-            c.execute("""
-            CREATE TABLE IF NOT EXISTS test_papers (
-                id SERIAL PRIMARY KEY,
-                test_name TEXT,
-                test_date DATE DEFAULT CURRENT_DATE,
-                total_questions INT,
-                attempted INT,
-                not_attempted INT,
-                guessed_correct INT,
-                guessed_incorrect INT,
-                carelessness_notes TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """)
-
+            c.execute("SELECT 1")
         conn.commit()
-except Exception as e:
-    print(f"Error initializing DB schemas: {e}")
+        # Initialize schema if needed
+        _init_schema(conn)
+        return conn
+    except Exception as e:
+        print(f"Connection check failed: {e}")
+        _safe_rollback(conn)
+        return None
 
 # ── NEWS ──────────────────────────────────────────────────────────────────────
 
 def insert_news(news):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
             for n in news:
-                c.execute("INSERT INTO news (title, content, date) VALUES (%s, %s, %s)", (n["title"], n["content"], n["date"]))
+                try:
+                    c.execute(
+                        """
+                        INSERT INTO news (title, content, url, date)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (title) DO NOTHING
+                        """,
+                        (n["title"], n.get("content", ""), n.get("link", ""), n["date"])
+                    )
+                except Exception:
+                    _safe_rollback(conn)
+                    c.execute(
+                        """
+                        INSERT INTO news (title, content, date)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (title) DO NOTHING
+                        """,
+                        (n["title"], n.get("content", ""), n["date"])
+                    )
         conn.commit()
     except Exception as e:
-        print(f"Error: {e}")
-        conn.rollback()
+        print(f"Error inserting news: {e}")
+        _safe_rollback(conn)
 
 def get_news():
+    conn = get_conn()
     if not conn: return []
     try:
         with conn.cursor() as c:
-            c.execute("SELECT title, content, date FROM news")
+            try:
+                c.execute("SELECT title, content, date, COALESCE(url, '') FROM news")
+            except Exception:
+                _safe_rollback(conn)
+                c.execute("SELECT title, content, date, '' FROM news")
             return c.fetchall()
     except Exception as e:
         print(e)
+        _safe_rollback(conn)
         return []
 
 def save_question(q):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
@@ -152,9 +207,10 @@ def save_question(q):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
 
 def get_questions():
+    conn = get_conn()
     if not conn: return []
     try:
         with conn.cursor() as c:
@@ -162,11 +218,13 @@ def get_questions():
             return [x[0] for x in c.fetchall()]
     except Exception as e:
         print(e)
+        _safe_rollback(conn)
         return []
 
 # ── RESULTS ───────────────────────────────────────────────────────────────────
 
 def save_result(data):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
@@ -174,9 +232,10 @@ def save_result(data):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
 
 def get_results():
+    conn = get_conn()
     if not conn: return []
     try:
         with conn.cursor() as c:
@@ -184,9 +243,11 @@ def get_results():
             return c.fetchall()
     except Exception as e:
         print(e)
+        _safe_rollback(conn)
         return []
 
 def delete_result(rowid):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
@@ -194,11 +255,12 @@ def delete_result(rowid):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
 
 # ── SAVED ITEMS ───────────────────────────────────────────────────────────────
 
 def save_item(item_type, content):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
@@ -206,9 +268,10 @@ def save_item(item_type, content):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
 
 def get_saved_items():
+    conn = get_conn()
     if not conn: return []
     try:
         with conn.cursor() as c:
@@ -216,9 +279,11 @@ def get_saved_items():
             return c.fetchall()
     except Exception as e:
         print(e)
+        _safe_rollback(conn)
         return []
 
 def delete_saved_item(item_id):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
@@ -226,9 +291,10 @@ def delete_saved_item(item_id):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
 
 def clean_old(days=15):
+    conn = get_conn()
     if not conn: return
     try:
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -237,11 +303,12 @@ def clean_old(days=15):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
 
 # ── USER SETTINGS ─────────────────────────────────────────────────────────────
 
 def get_retention(username):
+    conn = get_conn()
     if not conn: return 15
     try:
         with conn.cursor() as c:
@@ -252,9 +319,11 @@ def get_retention(username):
             return 15
     except Exception as e:
         print(e)
+        _safe_rollback(conn)
         return 15
 
 def set_retention(username, days):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
@@ -267,11 +336,12 @@ def set_retention(username, days):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
 
 # ── CA FILTERS ────────────────────────────────────────────────────────────────
 
 def add_ca_filter(word):
+    conn = get_conn()
     if not conn: return False
     try:
         with conn.cursor() as c:
@@ -280,10 +350,11 @@ def add_ca_filter(word):
         return True
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
         return False
 
 def get_ca_filters():
+    conn = get_conn()
     if not conn: return []
     try:
         with conn.cursor() as c:
@@ -291,9 +362,11 @@ def get_ca_filters():
             return c.fetchall()
     except Exception as e:
         print(e)
+        _safe_rollback(conn)
         return []
 
 def delete_ca_filter(filter_id):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
@@ -301,11 +374,12 @@ def delete_ca_filter(filter_id):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
 
 # ── AI REPORTS ────────────────────────────────────────────────────────────────
 
 def save_ai_report(report_type, period_label, content):
+    conn = get_conn()
     if not conn: return None
     try:
         with conn.cursor() as c:
@@ -318,10 +392,11 @@ def save_ai_report(report_type, period_label, content):
         return new_id
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
         return None
 
 def get_ai_reports():
+    conn = get_conn()
     if not conn: return []
     try:
         with conn.cursor() as c:
@@ -329,9 +404,11 @@ def get_ai_reports():
             return c.fetchall()
     except Exception as e:
         print(e)
+        _safe_rollback(conn)
         return []
 
 def delete_ai_report(report_id):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
@@ -339,12 +416,13 @@ def delete_ai_report(report_id):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
 
 # ── TEST PAPERS ───────────────────────────────────────────────────────────────
 
 def save_test_paper(test_name, test_date, total_questions, attempted, not_attempted,
                     guessed_correct, guessed_incorrect, carelessness_notes):
+    conn = get_conn()
     if not conn: return None
     try:
         with conn.cursor() as c:
@@ -360,10 +438,11 @@ def save_test_paper(test_name, test_date, total_questions, attempted, not_attemp
         return new_id
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
         return None
 
 def get_test_papers():
+    conn = get_conn()
     if not conn: return []
     try:
         with conn.cursor() as c:
@@ -375,9 +454,11 @@ def get_test_papers():
             return c.fetchall()
     except Exception as e:
         print(e)
+        _safe_rollback(conn)
         return []
 
 def delete_test_paper(paper_id):
+    conn = get_conn()
     if not conn: return
     try:
         with conn.cursor() as c:
@@ -385,4 +466,4 @@ def delete_test_paper(paper_id):
         conn.commit()
     except Exception as e:
         print(e)
-        conn.rollback()
+        _safe_rollback(conn)
