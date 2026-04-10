@@ -1,4 +1,4 @@
-**UPSC-Ai URL: **[Link Text](https://upsc-ai-1l60.onrender.com)
+**UPSC-Ai**
 
 pip install fastapi uvicorn streamlit requests feedparser python-dotenv groq PyPDF2
 pip install streamlit feedparser groq python-dotenv PyPDF2
@@ -11,8 +11,6 @@ python -m streamlit run app.py
 
 
 net start postgresql-x64-18
-
-GitHub PAT TOKEN: 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
 
 
 

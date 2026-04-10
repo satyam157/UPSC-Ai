@@ -7,3 +7,7 @@ reportlab
 pandas
 psycopg2-binary
 extra-streamlit-components
+requests
+beautifulsoup4
+lxml
+feedparser

@@ -1,0 +1,305 @@
+{
+  "prelims": {
+    "subjects": [
+      {
+        "rank": 1,
+        "name": "Current Affairs & Modern History",
+        "frequency": 35,
+        "average_questions_per_year": 15,
+        "important_chapters": [
+          "Recent News & Events",
+          "Government Schemes & Policies",
+          "International Relations",
+          "India-China Relations",
+          "India-US Relations",
+          "Climate Change & Environment",
+          "Economic News",
+          "Elections & Political Updates",
+          "Defence & Strategic Issues"
+        ]
+      },
+      {
+        "rank": 2,
+        "name": "Geography",
+        "frequency": 28,
+        "average_questions_per_year": 12,
+        "important_chapters": [
+          "Indian Geography & Boundaries",
+          "Climate & Monsoon",
+          "Water Resources & Rivers",
+          "Natural Resources & Minerals",
+          "Disaster Management",
+          "Environmental Geography",
+          "World Geography",
+          "Maps & Physical Features"
+        ]
+      },
+      {
+        "rank": 3,
+        "name": "Indian Polity & Constitution",
+        "frequency": 25,
+        "average_questions_per_year": 11,
+        "important_chapters": [
+          "Constitution Basics",
+          "Fundamental Rights & Duties",
+          "Directive Principles",
+          "Executive - President & PM",
+          "Parliament - Lok Sabha & Rajya Sabha",
+          "Judiciary System",
+          "Elections & Electoral Process",
+          "Amendments & Constitutional Bodies",
+          "Centre-State Relations",
+          "Local Governance"
+        ]
+      },
+      {
+        "rank": 4,
+        "name": "Economy & Finance",
+        "frequency": 22,
+        "average_questions_per_year": 9,
+        "important_chapters": [
+          "Economic Survey Updates",
+          "Budget & Fiscal Policy",
+          "Monetary Policy & RBI",
+          "Banking & Financial System",
+          "Stock Market & Securities",
+          "Inflation & Deflation",
+          "GDP & Growth Rate",
+          "Foreign Investment & Trade",
+          "Public Finance",
+          "Economic Index & Indicators"
+        ]
+      },
+      {
+        "rank": 5,
+        "name": "Science & Technology",
+        "frequency": 20,
+        "average_questions_per_year": 8,
+        "important_chapters": [
+          "Atomic & Nuclear Science",
+          "Space & Astronomy",
+          "Biotechnology & Genetic Engineering",
+          "IT & Cybersecurity",
+          "Medical Science & Health",
+          "Renewable Energy",
+          "Climate Tech",
+          "Recent Innovations & Research"
+        ]
+      },
+      {
+        "rank": 6,
+        "name": "History",
+        "frequency": 18,
+        "average_questions_per_year": 7,
+        "important_chapters": [
+          "Mughal Empire",
+          "British India & Freedom Struggle",
+          "Ancient & Medieval India",
+          "Independence Movement Leaders",
+          "Partition & Nation Formation",
+          "Post-Independence History",
+          "World History - WW1 & WW2"
+        ]
+      },
+      {
+        "rank": 7,
+        "name": "Culture & Heritage",
+        "frequency": 15,
+        "average_questions_per_year": 6,
+        "important_chapters": [
+          "Indian Art & Architecture",
+          "Literature & Language",
+          "Monuments & UNESCO Sites",
+          "Religion & Philosophy",
+          "Festivals & Traditions",
+          "Archaeological Discoveries"
+        ]
+      },
+      {
+        "rank": 8,
+        "name": "Ethics & Integrity",
+        "frequency": 12,
+        "average_questions_per_year": 5,
+        "important_chapters": [
+          "Ethical Dilemmas",
+          "Public Service Values",
+          "Corruption & Integrity",
+          "Decision Making",
+          "Case Studies"
+        ]
+      }
+    ]
+  },
+  "mains": {
+    "subjects": [
+      {
+        "rank": 1,
+        "name": "General Studies Paper 1 (Indian Heritage & Culture, History, Geography)",
+        "frequency": 40,
+        "average_questions_per_year": 8,
+        "important_chapters": [
+          "Pre-Colonial India",
+          "Colonial India & Freedom Struggle",
+          "Post-Independence Achievements",
+          "Indian Geography - Physical & Political",
+          "Climate & Natural Resources",
+          "Urbanization & Infrastructure",
+          "Art & Architecture",
+          "Literature & Language",
+          "Religion & Philosophy"
+        ],
+        "answer_format": "500 words per question",
+        "marks_per_question": 250
+      },
+      {
+        "rank": 2,
+        "name": "General Studies Paper 2 (Governance, Constitution, Polity)",
+        "frequency": 38,
+        "average_questions_per_year": 8,
+        "important_chapters": [
+          "Constitution & Governance",
+          "Rights & Duties",
+          "Indian Political System",
+          "Centre-State Relations",
+          "Electoral Process",
+          "Judiciary & Rule of Law",
+          "Civil Rights & Issues",
+          "Government Schemes",
+          "Public Services"
+        ],
+        "answer_format": "500 words per question",
+        "marks_per_question": 250
+      },
+      {
+        "rank": 3,
+        "name": "General Studies Paper 3 (Economy, Technology, Environment)",
+        "frequency": 35,
+        "average_questions_per_year": 8,
+        "important_chapters": [
+          "Economic Development",
+          "Inflation & Poverty",
+          "Infrastructure & Investment",
+          "Agricultural Issues",
+          "Environmental Protection",
+          "Climate Change & Disasters",
+          "Science & Technology",
+          "Cybersecurity & Data Protection",
+          "Space & Bio-tech",
+          "Security Challenges"
+        ],
+        "answer_format": "500 words per question",
+        "marks_per_question": 250
+      },
+      {
+        "rank": 4,
+        "name": "General Studies Paper 4 (Ethics, Integrity, Aptitude)",
+        "frequency": 20,
+        "average_questions_per_year": 4,
+        "important_chapters": [
+          "Ethical Dilemmas",
+          "Decision Making",
+          "Human Values",
+          "Public Service Ethics",
+          "Accountability & Transparency",
+          "Attitude & Empathy",
+          "Case Studies",
+          "Corruption Prevention"
+        ],
+        "answer_format": "300-400 words per question",
+        "marks_per_question": 250
+      },
+      {
+        "rank": 5,
+        "name": "Optional Subject - Topic 1",
+        "frequency": 25,
+        "average_questions_per_year": 5,
+        "important_chapters": [],
+        "note": "Varies by optional chosen"
+      },
+      {
+        "rank": 6,
+        "name": "Optional Subject - Topic 2",
+        "frequency": 25,
+        "average_questions_per_year": 5,
+        "important_chapters": [],
+        "note": "Varies by optional chosen"
+      }
+    ]
+  },
+  "trends": {
+    "prelims": {
+      "last_5_years": {
+        "current_affairs_avg_questions": 15,
+        "history_avg_questions": 7,
+        "geography_avg_questions": 12,
+        "polity_avg_questions": 11,
+        "economy_avg_questions": 9,
+        "science_avg_questions": 8,
+        "environment_avg_questions": 6
+      },
+      "question_pattern_changes": [
+        "Increased emphasis on Current Affairs (35%)",
+        "More Map-based Geography questions",
+        "Constitutional amendments emphasis",
+        "Renewable energy focus",
+        "Climate & Disaster management",
+        "Government schemes importance"
+      ],
+      "difficulty_trend": "Moderate to Hard - Conceptual Understanding Required"
+    },
+    "mains": {
+      "last_5_years": {
+        "gs_paper_1_average_questions": 8,
+        "gs_paper_2_average_questions": 8,
+        "gs_paper_3_average_questions": 8,
+        "gs_paper_4_average_questions": 4,
+        "optional_average_questions": 10
+      },
+      "writing_style_trends": [
+        "Analytical approach preferred",
+        "Case-based questions increasing",
+        "Multi-part questions common",
+        "Current affairs integration",
+        "Solution-oriented answers needed"
+      ],
+      "sectional_time_allocation": {
+        "gs_paper_1": "2 hours 15 minutes",
+        "gs_paper_2": "2 hours 15 minutes",
+        "gs_paper_3": "2 hours 15 minutes",
+        "gs_paper_4": "1 hour 30 minutes"
+      }
+    }
+  },
+  "study_plan_parameters": {
+    "prelims": {
+      "total_months": 6,
+      "daily_study_hours": 6,
+      "weekly_mock_tests": 2,
+      "monthly_full_tests": 4,
+      "revision_cycles": 3,
+      "priority_allocation": {
+        "current_affairs": 25,
+        "geography": 20,
+        "polity": 18,
+        "economy": 15,
+        "history": 10,
+        "environment": 7,
+        "others": 5
+      }
+    },
+    "mains": {
+      "total_months": 4,
+      "daily_study_hours": 4,
+      "weekly_answer_writing": 5,
+      "monthly_mock_tests": 2,
+      "revision_cycles": 2,
+      "paper_wise_allocation": {
+        "gs_paper_1": 22,
+        "gs_paper_2": 22,
+        "gs_paper_3": 22,
+        "gs_paper_4": 14,
+        "optional": 20
+      }
+    }
+  }
+}
