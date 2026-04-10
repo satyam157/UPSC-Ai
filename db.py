@@ -54,9 +54,15 @@ def _init_schema(connection):
                     title TEXT,
                     content TEXT,
                     url TEXT,
+                    source TEXT,
+                    category TEXT,
                     date TEXT
                 )
             """)
+            # Ensure columns exist if table was already created
+            cur.execute("ALTER TABLE news ADD COLUMN IF NOT EXISTS url TEXT")
+            cur.execute("ALTER TABLE news ADD COLUMN IF NOT EXISTS source TEXT")
+            cur.execute("ALTER TABLE news ADD COLUMN IF NOT EXISTS category TEXT")
             # Fix duplicates before creating unique index
             cur.execute("DELETE FROM news a USING news b WHERE a.id < b.id AND a.title = b.title")
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS news_title_uq ON news (title)")
@@ -132,6 +138,43 @@ def _init_schema(connection):
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # URL Summaries (Article Summarizer)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS url_summaries (
+                    id SERIAL PRIMARY KEY,
+                    url VARCHAR(1000) UNIQUE,
+                    title VARCHAR(500),
+                    subject VARCHAR(250),
+                    summary TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Syllabus Quizzes
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS syllabus_quizzes (
+                    id SERIAL PRIMARY KEY,
+                    subject VARCHAR(250),
+                    source VARCHAR(100),
+                    questions JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Syllabus Quiz Attempts
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS syllabus_quiz_attempts (
+                    id SERIAL PRIMARY KEY,
+                    quiz_id INTEGER,
+                    user_answers JSONB,
+                    score INTEGER,
+                    percentage INTEGER,
+                    attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (quiz_id) REFERENCES syllabus_quizzes(id) ON DELETE CASCADE
+                )
+            """)
+        
         connection.commit()
     except Exception as e:
         _safe_rollback(connection)
@@ -158,50 +201,133 @@ def get_conn():
 # ── NEWS ──────────────────────────────────────────────────────────────────────
 
 def insert_news(news):
-    conn = get_conn()
-    if not conn: return
+    """Insert news items using executemany for efficiency."""
+    if not news:
+        return 0
+    
+    conn = get_connection()
+    if not conn:
+        return 0
+    
+    inserted_count = 0
     try:
         with conn.cursor() as c:
-            for n in news:
-                try:
-                    c.execute(
-                        """
-                        INSERT INTO news (title, content, url, date)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (title) DO NOTHING
-                        """,
-                        (n["title"], n.get("content", ""), n.get("link", ""), n["date"])
-                    )
-                except Exception:
-                    _safe_rollback(conn)
-                    c.execute(
-                        """
-                        INSERT INTO news (title, content, date)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT (title) DO NOTHING
-                        """,
-                        (n["title"], n.get("content", ""), n["date"])
-                    )
+            # Prepare data for executemany
+            data = [
+                (n.get("title", ""), n.get("content", ""), n.get("url", ""), n.get("source", ""), n.get("category", "General"), n.get("date", ""))
+                for n in news
+            ]
+            
+            # executemany is more efficient than looping
+            c.executemany(
+                """
+                INSERT INTO news (title, content, url, source, category, date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (title) DO NOTHING
+                """,
+                data
+            )
+            inserted_count = c.rowcount
+        
         conn.commit()
+        return inserted_count
     except Exception as e:
-        print(f"Error inserting news: {e}")
+        print(f"Insert error: {e}")
         _safe_rollback(conn)
+        return 0
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
 def get_news():
-    conn = get_conn()
-    if not conn: return []
+    """Retrieve recent news from database, ordered by date (newest first). Limited to 500 items for performance."""
+    conn = get_connection()
+    if not conn:
+        return []
+    
     try:
         with conn.cursor() as c:
-            try:
-                c.execute("SELECT title, content, date, COALESCE(url, '') FROM news")
-            except Exception:
-                _safe_rollback(conn)
-                c.execute("SELECT title, content, date, '' FROM news")
+            # Retrieve all relevant news fields including category
+            c.execute("SELECT title, content, date, url, source, category FROM news ORDER BY date DESC, id DESC LIMIT 600")
             return c.fetchall()
     except Exception as e:
-        print(e)
-        _safe_rollback(conn)
+        print(f"Error retrieving news: {e}")
         return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def get_news_with_ids():
+    """
+    Like get_news() but includes the primary key `id` as the first column.
+    Used by the DB audit so noise can be purged safely by PK.
+
+    Returns rows: (id, title, content, date, url, source, category)
+    """
+    conn = get_connection()
+    if not conn:
+        return []
+
+    try:
+        with conn.cursor() as c:
+            c.execute(
+                "SELECT id, title, content, date, url, source, category "
+                "FROM news ORDER BY date DESC, id DESC LIMIT 600"
+            )
+            return c.fetchall()
+    except Exception as e:
+        print(f"Error retrieving news with IDs: {e}")
+        return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def delete_news_by_ids(ids: list) -> int:
+    """
+    Delete news articles by their primary key IDs.
+    Returns the number of rows actually deleted.
+
+    This is safer than deleting by title (avoids accidental multi-row deletes
+    when two articles share identical truncated titles).
+    """
+    if not ids:
+        return 0
+
+    conn = get_connection()
+    if not conn:
+        return 0
+
+    try:
+        with conn.cursor() as c:
+            # Use a single parameterised IN query for efficiency
+            placeholders = ",".join(["%s"] * len(ids))
+            c.execute(f"DELETE FROM news WHERE id IN ({placeholders})", ids)
+            deleted = c.rowcount
+        conn.commit()
+        return deleted
+    except Exception as e:
+        print(f"Error deleting news by IDs: {e}")
+        _safe_rollback(conn)
+        return 0
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
 
 def save_question(q):
     conn = get_conn()
@@ -472,3 +598,348 @@ def delete_test_paper(paper_id):
     except Exception as e:
         print(e)
         _safe_rollback(conn)
+
+# ── SYLLABUS SUMMARIES (Yojana, Kurukshetra, Economic Survey, Budget, Yearbook) ──
+
+def save_syllabus_summary(resource_type, title, content, source_url=""):
+    """Save a syllabus resource summary (Yojana, Kurukshetra, etc.)"""
+    conn = get_connection()
+    if not conn:
+        return None
+    
+    try:
+        with conn.cursor() as c:
+            c.execute(
+                """
+                CREATE TABLE IF NOT EXISTS syllabus_summaries (
+                    id SERIAL PRIMARY KEY,
+                    resource_type TEXT,
+                    title TEXT,
+                    content TEXT,
+                    source_url TEXT,
+                    saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            c.execute(
+                """
+                INSERT INTO syllabus_summaries (resource_type, title, content, source_url)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id
+                """,
+                (resource_type, title, content, source_url)
+            )
+            result_id = c.fetchone()[0]
+        conn.commit()
+        return result_id
+    except Exception as e:
+        print(f"Error saving syllabus summary: {e}")
+        _safe_rollback(conn)
+        return None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+def get_syllabus_summaries(resource_type=None):
+    """Get syllabus summaries, optionally filtered by resource type"""
+    conn = get_connection()
+    if not conn:
+        return []
+    
+    try:
+        with conn.cursor() as c:
+            if resource_type:
+                c.execute(
+                    """
+                    SELECT id, resource_type, title, content, source_url, saved_at
+                    FROM syllabus_summaries
+                    WHERE resource_type = %s
+                    ORDER BY saved_at DESC
+                    LIMIT 100
+                    """,
+                    (resource_type,)
+                )
+            else:
+                c.execute(
+                    """
+                    SELECT id, resource_type, title, content, source_url, saved_at
+                    FROM syllabus_summaries
+                    ORDER BY saved_at DESC
+                    LIMIT 200
+                    """
+                )
+            return c.fetchall()
+    except Exception as e:
+        print(f"Error retrieving syllabus summaries: {e}")
+        return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+def delete_syllabus_summary(summary_id):
+    """Delete a syllabus summary"""
+    conn = get_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as c:
+            c.execute("DELETE FROM syllabus_summaries WHERE id = %s", (summary_id,))
+        conn.commit()
+        return c.rowcount > 0
+    except Exception as e:
+        print(f"Error deleting syllabus summary: {e}")
+        _safe_rollback(conn)
+        return False
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SYLLABUS QUIZ FUNCTIONS
+# ════════════════════════════════════════════════════════════════════════════
+
+def save_syllabus_quiz(subject, questions_json, source="Article Summary"):
+    """
+    Save a quiz generated from an article summary
+    Returns: quiz_id
+    """
+    conn = get_connection()
+    if not conn:
+        return None
+    
+    try:
+        with conn.cursor() as c:
+            c.execute("""
+                INSERT INTO syllabus_quizzes (subject, source, questions)
+                VALUES (%s, %s, %s)
+                RETURNING id
+            """, (subject, source, questions_json))
+            
+            quiz_id = c.fetchone()[0]
+        conn.commit()
+        return quiz_id
+    except Exception as e:
+        print(f"Error saving syllabus quiz: {e}")
+        _safe_rollback(conn)
+        return None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def get_syllabus_quiz(quiz_id):
+    """Get a specific quiz"""
+    conn = get_connection()
+    if not conn:
+        return None
+    
+    try:
+        with conn.cursor() as c:
+            c.execute("""
+                SELECT id, resource_type, summary_id, questions, created_at
+                FROM syllabus_quizzes WHERE id = %s
+            """, (quiz_id,))
+            
+            result = c.fetchone()
+            return result
+    except Exception as e:
+        print(f"Error fetching syllabus quiz: {e}")
+        return None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def save_quiz_attempt(quiz_id, user_answers, score, percentage):
+    """
+    Save a quiz attempt/result
+    Returns: attempt_id
+    """
+    conn = get_connection()
+    if not conn:
+        return None
+    
+    try:
+        with conn.cursor() as c:
+            c.execute("""
+                INSERT INTO syllabus_quiz_attempts (quiz_id, user_answers, score, percentage)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id
+            """, (quiz_id, user_answers, score, percentage))
+            
+            attempt_id = c.fetchone()[0]
+        conn.commit()
+        return attempt_id
+    except Exception as e:
+        print(f"Error saving quiz attempt: {e}")
+        _safe_rollback(conn)
+        return None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def get_quiz_attempts(quiz_id, limit=10):
+    """Get all attempts for a quiz"""
+    conn = get_connection()
+    if not conn:
+        return []
+    
+    try:
+        with conn.cursor() as c:
+            c.execute("""
+                SELECT id, quiz_id, user_answers, score, percentage, attempted_at
+                FROM syllabus_quiz_attempts
+                WHERE quiz_id = %s
+                ORDER BY attempted_at DESC
+                LIMIT %s
+            """, (quiz_id, limit))
+            
+            results = c.fetchall()
+            return results
+    except Exception as e:
+        print(f"Error fetching quiz attempts: {e}")
+        return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def delete_syllabus_quiz(quiz_id):
+    """Delete a quiz and all its attempts"""
+    conn = get_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as c:
+            # Delete attempts first (due to foreign key)
+            c.execute("DELETE FROM syllabus_quiz_attempts WHERE quiz_id = %s", (quiz_id,))
+            # Delete quiz
+            c.execute("DELETE FROM syllabus_quizzes WHERE id = %s", (quiz_id,))
+        conn.commit()
+        return c.rowcount > 0
+    except Exception as e:
+        print(f"Error deleting syllabus quiz: {e}")
+        _safe_rollback(conn)
+        return False
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# URL SUMMARY STORAGE
+# ════════════════════════════════════════════════════════════════════════════
+
+def save_url_summary(url, title, summary, subject=""):
+    """
+    Save a URL summary from the URL Summarizer tool
+    Returns: summary_id
+    """
+    conn = get_connection()
+    if not conn:
+        return None
+    
+    try:
+        with conn.cursor() as c:
+            c.execute("""
+                INSERT INTO url_summaries (url, title, subject, summary)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (url) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    subject = EXCLUDED.subject,
+                    summary = EXCLUDED.summary
+                RETURNING id
+            """, (url, title, subject, summary))
+            
+            summary_id = c.fetchone()[0]
+        conn.commit()
+        return summary_id
+    except Exception as e:
+        print(f"Error saving URL summary: {e}")
+        _safe_rollback(conn)
+        return None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def get_url_summaries(limit=50):
+    """Get all saved URL summaries"""
+    conn = get_connection()
+    if not conn:
+        return []
+    
+    try:
+        with conn.cursor() as c:
+            c.execute("""
+                SELECT id, url, title, subject, summary, created_at
+                FROM url_summaries
+                ORDER BY created_at DESC
+                LIMIT %s
+            """, (limit,))
+            
+            results = c.fetchall()
+            return results
+    except Exception as e:
+        print(f"Error fetching URL summaries: {e}")
+        return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def delete_url_summary(summary_id):
+    """Delete a URL summary"""
+    conn = get_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as c:
+            c.execute("DELETE FROM url_summaries WHERE id = %s", (summary_id,))
+        conn.commit()
+        return c.rowcount > 0
+    except Exception as e:
+        print(f"Error deleting URL summary: {e}")
+        _safe_rollback(conn)
+        return False
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass

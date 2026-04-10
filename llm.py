@@ -6,40 +6,52 @@ load_dotenv()
 def ask_llm(prompt):
     """
     Standard LLM call with fallback models and retry logic.
-    Primary: llama-3.3-70b (best for complex JSON)
-    Falls back to 70b-8192, then Mixtral, then 8b-instant.
+    Primary: llama-3.1-8b-instant (best compatibility with Groq)
+    Falls back to larger models for complex tasks.
     """
     from groq import Groq
     import os
-
-    import streamlit as st
-    api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+    try:
+        import streamlit as st
+        api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+    except:
+        api_key = os.getenv("GROQ_API_KEY")
+    
     if not api_key:
         return "❌ API Key missing. Check .env file or Streamlit secrets."
 
-    client = Groq(api_key=api_key)
+    try:
+        client = Groq(api_key=api_key)
+    except Exception as e:
+        return f"❌ Groq API initialization failed: {str(e)}"
 
+    # Models ordered by compatibility and speed
+    # Recalibrated to target ~5500 tokens total (Prompt + Completion)
     models = [
-        "llama-3.3-70b-versatile",
-        "llama3-70b-8192",
-        "mixtral-8x7b-32768",
-        "llama-3.1-8b-instant"
+        ("llama-3.1-8b-instant", 1800, "fast & reliable"),
+        ("llama-3.3-70b-versatile", 2000, "detailed & comprehensive"),
+        ("llama-3.2-90b-vision-preview", 2000, "advanced"),
+        ("mixtral-8x7b-32768", 2000, "balanced"),
+        ("llama3-70b-8192", 2000, "fallback")
     ]
 
-    for model in models:
+    last_error = None
+    for model, max_tokens, description in models:
         try:
             res = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=8000 if "70b" in model else 4000,
-                temperature=0.5, # Lower temperature = more stable JSON
+                max_tokens=max_tokens,
+                temperature=0.5,  # Lower temperature = more stable output
+                timeout=60
             )
             return res.choices[0].message.content
         except Exception as e:
-            print(f"Model {model} failed: {e}")
+            last_error = str(e)
+            print(f"Model {model} ({description}) failed: {e}")
             continue
 
-    return "❌ All models failed"
+    return f"❌ All models failed. Last error: {last_error}"
 
 
 def ask_llm_vision(prompt, image_base64, mime_type="image/png"):
@@ -47,9 +59,19 @@ def ask_llm_vision(prompt, image_base64, mime_type="image/png"):
     from groq import Groq
     import os
 
-    import streamlit as st
-    api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
-    client = Groq(api_key=api_key)
+    try:
+        import streamlit as st
+        api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+    except:
+        api_key = os.getenv("GROQ_API_KEY")
+    
+    if not api_key:
+        return "❌ API Key missing. Check .env file."
+    
+    try:
+        client = Groq(api_key=api_key)
+    except Exception as e:
+        return f"❌ Groq API initialization failed: {str(e)}"
 
     vision_models = [
         "llama-3.2-90b-vision-preview",

@@ -3,15 +3,22 @@ import pandas as pd
 import PyPDF2
 from datetime import date, datetime, timedelta
 import json
+import time
 
-from scraper import fetch_news
+from scraper import fetch_news, is_upsc_relevant_topic, fetch_full_news_content
+from syllabus_scraper import RESOURCE_TYPES, get_all_resource_types, RESOURCE_URLS, fetch_resource_content, combine_articles_for_summary
+from url_summarizer import URLSummarizer, fetch_and_summarize_urls
+from syllabus_quiz_generator import generate_syllabus_quiz, evaluate_quiz_response
 from db import (
     insert_news, get_news, clean_old, get_retention, set_retention,
     save_result, get_results, delete_result,
     save_item, get_saved_items, delete_saved_item,
     add_ca_filter, get_ca_filters, delete_ca_filter,
     save_ai_report, get_ai_reports, delete_ai_report,
-    save_test_paper, get_test_papers, delete_test_paper
+    save_test_paper, get_test_papers, delete_test_paper,
+    save_syllabus_summary, get_syllabus_summaries, delete_syllabus_summary,
+    save_syllabus_quiz, get_syllabus_quiz, save_quiz_attempt, get_quiz_attempts, delete_syllabus_quiz,
+    save_url_summary, get_url_summaries, delete_url_summary
 )
 from quiz_generator import generate_quiz
 from llm import ask_llm, ask_llm_vision
@@ -20,6 +27,42 @@ from quiz_parser import parse_quiz
 from quiz_engine import evaluate
 from pdf_utils import generate_pdf
 from pyq_engine import predict, generate_prelims_pyqs, generate_mains_pyqs, generate_full_pyq_session
+from ask_esu import analyze_quiz_performance, generate_personalized_study_plan, generate_performance_summary, format_study_plan_output, load_pyq_data
+
+# ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
+def extract_subject_from_title(title):
+    """
+    Intelligently extract subject from article title
+    Returns a simplified subject category
+    """
+    title_lower = title.lower()
+    
+    # Subject mapping with keywords
+    subject_keywords = {
+        "Policing & Law": ["police", "policing", "law enforcement", "fir", "criminal", "crime", "jail", "prison", "court"],
+        "Education": ["education", "nep", "school", "university", "student", "literacy", "exam", "curriculum"],
+        "Health": ["health", "disease", "vaccine", "hospital", "medical", "pandemic", "covid", "nutrition"],
+        "Economy": ["economy", "gdp", "inflation", "finance", "budget", "tax", "monetary", "rbi", "commerce"],
+        "Government": ["government", "ministry", "policy", "scheme", "parliament", "act", "bill", "governance"],
+        "Environment": ["environment", "climate", "pollution", "forest", "wildlife", "conservation", "green"],
+        "Foreign Affairs": ["foreign", "international", "diplomat", "trade", "agreement", "border", "geopolitics"],
+        "Technology": ["technology", "digital", "ai", "startup", "innovation", "tech", "cyber", "it"],
+        "Agriculture": ["agriculture", "farming", "crop", "irrigation", "soil", "farmer", "agri"],
+        "Infrastructure": ["railway", "highway", "metro", "infrastructure", "transport", "roads", "power"],
+        "Social Issues": ["social", "rights", "discrimination", "equality", "welfare", "poverty", "gender"]
+    }
+    
+    for subject, keywords in subject_keywords.items():
+        if any(keyword in title_lower for keyword in keywords):
+            return subject
+    
+    # Default: extract from first meaningful word
+    words = title_lower.split()
+    for word in words:
+        if len(word) > 3 and word not in ["from", "with", "what", "your", "the", "and", "for", "are"]:
+            return word.capitalize()
+    
+    return "General"
 
 # ─── PAGE CONFIG ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="UPSC AI System", layout="wide")
@@ -97,6 +140,14 @@ if not st.session_state["logged_in"]:
     login_page()
     st.stop()
 
+# ─── INITIALIZE ASKEU SESSION STATE ───────────────────────────────────────────
+if "study_plan_generated" not in st.session_state:
+    st.session_state["study_plan_generated"] = False
+if "study_plan_output" not in st.session_state:
+    st.session_state["study_plan_output"] = {}
+if "show_esu_welcome" not in st.session_state:
+    st.session_state["show_esu_welcome"] = True
+
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 st.sidebar.title(f"👤 {st.session_state['username']}")
 
@@ -110,6 +161,8 @@ page = st.sidebar.radio("Navigate", [
     "Practice",
     "PDF Quiz",
     "Results",
+    "Ask Esu",
+    "Summarizer",
     "AI Analysis",
     "Test Paper Analysis"
 ])
@@ -138,15 +191,81 @@ def clear_state(key):
 # ══════════════════════════════════════════════════════════════════════════════
 if page == "Current Affairs":
     # ── Control row ──────────────────────────────────────────────────────────
-    if st.button("🔄 Refresh Content", use_container_width=True):
-        with st.spinner("Fetching news..."):
-            insert_news(fetch_news())
-        st.toast("✅ Feed updated successfully!")
-        safe_rerun()
+    col_btn, col_days = st.columns([4, 1])
+    with col_days:
+        fetch_days = st.number_input("Days to fetch", min_value=1, max_value=30, value=1)
+    with col_btn:
+        st.markdown('<div style="margin-top: 28px;"></div>', unsafe_allow_html=True)
+        if st.button("🔄 Refresh Content", use_container_width=True):
+            with st.spinner(f"Fetching latest news from PIB, The Hindu, Indian Express for last {fetch_days} day(s)..."):
+                try:
+                    fetched_news = fetch_news(days=fetch_days)
+                    if not fetched_news:
+                        st.warning("""
+                        ⚠️ **No news items found**
+                        
+                        This could mean:
+                        - RSS feeds are temporarily unavailable
+                        - Try again in a few moments
+                        - Already have the news for the selected days in the database
+                        """)
+                    else:
+                        insert_news(fetched_news)
+                        st.success(f"✅ **{len(fetched_news)} news items added!**")
+                        st.info("📰 Including: Politics, Policy, Economy, International Relations, Governance")
+                except Exception as e:
+                    st.error(f"❌ **Error fetching news:** {str(e)}")
+            safe_rerun()
+
+    # ── Source Analytics ──────────────────────────────────────────────────────
+    news_data = get_news()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_items = [n for n in news_data if n[2] == today_str]
+    
+    if today_items:
+        with st.expander("📊 **Today's News Sources Analytics**", expanded=False):
+            from collections import Counter
+            # Count sources and categories, ensuring no None values
+            source_counts = Counter([str(n[4] or "Other") for n in today_items])
+            cat_counts = Counter([str(n[5] or "General") if len(n) > 5 else "General" for n in today_items])
+            
+            # Display metrics in a responsive grid (max 4 per row)
+            src_items = list(source_counts.items())
+            rows = (len(src_items) + 3) // 4
+            for r in range(rows):
+                cols = st.columns(min(4, len(src_items) - r*4))
+                for i, (src, count) in enumerate(src_items[r*4 : (r+1)*4]):
+                    with cols[i]:
+                        st.metric(str(src).upper(), f"{count} items")
+            
+            st.divider()
+            st.markdown("**Categorization:** " + " | ".join([f"{k}: {v}" for k, v in cat_counts.items()]))
+
+        # ── Filter Reviewer ───────────────────────────────────────────────────
+        with st.expander("🛠️ **AI Filter Quality Auditor**", expanded=False):
+            st.markdown("""
+            This tool uses AI to audit the news items fetched today and yesterday. 
+            It evaluates if the system is correctly identifying UPSC-relevant content 
+            and suggests improvements for the keyword list and blacklist.
+            """)
+            
+            if st.button("🔍 Run Weekly/Daily Filter Audit", use_container_width=True):
+                from filter_reviewer import perform_filter_review
+                with st.spinner("🤖 AI is auditing recent news items..."):
+                    report = perform_filter_review()
+                    st.session_state["filter_audit_report"] = report
+            
+            if "filter_audit_report" in st.session_state:
+                st.markdown("---")
+                st.markdown("### 📋 AI Audit Report")
+                st.markdown(st.session_state["filter_audit_report"])
+                
+                if st.button("🗑️ Clear Audit"):
+                    del st.session_state["filter_audit_report"]
+                    st.rerun()
 
     # ── News Feed ─────────────────────────────────────────────────────────────
     st.markdown("---")
-    news_data = get_news()
     filter_words = [w.lower() for _, w in get_ca_filters()]
 
     def is_filtered(title):
@@ -166,107 +285,96 @@ if page == "Current Affairs":
                 seen_titles.add(n[0])
                 unique_news.append(n)
 
-        dates = sorted(list(set(n[2] for n in unique_news)), reverse=True)
-        for d in dates:
-            day_items = [n for n in unique_news if n[2] == d and not is_filtered(n[0])]
-            if day_items:
-                with st.expander(f"📅 Current Affairs for {d} ({len(day_items)} items)"):
-                    for idx, n in enumerate(day_items):
-                        title   = n[0]
-                        content = n[1] if len(n) > 1 else ""
-                        url     = n[3] if len(n) > 3 else ""
-                        
-                        # Unique key for this news item
-                        news_key = f"{d}_{idx}_{title[:30]}"
-                        expanded_key = f"news_expanded_{news_key}"
-                        
-                        # News item header with button
-                        col_title, col_btn = st.columns([8, 1])
-                        with col_title:
-                            st.markdown(f"**• {title}**")
-                        with col_btn:
-                            if st.button(
-                                "🔍" if not st.session_state.get(expanded_key, False) else "✕",
-                                key=f"btn_{news_key}",
-                                help="View summary" if not st.session_state.get(expanded_key, False) else "Close summary"
-                            ):
-                                st.session_state[expanded_key] = not st.session_state.get(expanded_key, False)
-                                safe_rerun()
-                        
-                        # ── Display Summary if Expanded ────────────────
-                        if st.session_state.get(expanded_key, False):
-                            with st.container():
-                                st.markdown(
-                                    f'<div style="background:#1e1e2e;border:2px solid #7c3aed;border-radius:12px;'
-                                    f'padding:18px 20px;margin:10px 0;color:#e2e8f0;">'
-                                    f'<p style="color:#a78bfa;margin:0 0 8px 0;font-size:13px;font-weight:600;'
-                                    f'text-transform:uppercase;letter-spacing:0.5px;">📊 UPSC Analysis</p>'
-                                    f'</div>',
-                                    unsafe_allow_html=True
-                                )
-                                
-                                # ── Generate or retrieve summary ────────
-                                if title not in st.session_state["news_summaries"]:
-                                    with st.spinner("🤖 Generating UPSC-focused analysis..."):
-                                        raw = content.strip() if content and content.strip() else title
-                                        prompt = f"""You are an expert UPSC coach and current affairs analyst. Analyse the following news article and present a structured UPSC-focused summary using the exact format below. Be concise, factual, and exam-relevant.
+        # Specialized Tabs for UPSC Focus
+        tab_all, tab_editorial, tab_explained, tab_pib = st.tabs([
+            "🗞️ All News", "📝 Editorials", "💡 Explained", "📣 PIB"
+        ])
 
----
-**NEWS TITLE:** {title}
+        # Source context colors
+        SOURCE_COLORS = {
+            "the hindu editorial": "#d32f2f", "the hindu opinion": "#c62828", "the hindu": "#e53935",
+            "ie explained": "#1565c0", "indian express opinion": "#0d47a1", "indian express": "#1976d2",
+            "pib": "#2e7d32", "bs editorial": "#6a1b9a", "business standard": "#7b1fa2",
+            "down to earth": "#00695c", "the print": "#f57f17", "livemint editorial": "#3e2723"
+        }
+        DEFAULT_COLOR = "#546e7a"
 
-**CONTENT:** {raw}
----
-
-Provide the analysis in this exact structured format:
-
-## 📌 One-Liner (What happened — one crisp sentence)
-
-## 🏛️ Relevant Articles / Constitutional Provisions / Acts
-- List any relevant Articles of the Constitution, Acts of Parliament, International agreements, or Government schemes directly related to this news.
-
-## 📖 Background
-- Key historical context or background that a UPSC aspirant must know about this topic.
-- Include GS Paper relevance (GS1 / GS2 / GS3 / GS4 / Mains Essay).
-
-## ⭐ Important Points (Key Facts for Prelims & Mains)
-- Bullet-point the most important factual information, dates, names, statistics, or policy details.
-- Include topics this connects to (e.g., federalism, environment, economy, governance).
-
-## ⚠️ Problems / Challenges
-- What are the core issues, challenges, or concerns highlighted by this news?
-
-## ✅ Solutions / Government Response / Way Forward
-- What steps have been taken or recommended? Policy measures, government schemes, expert recommendations.
-
-## 🔚 Conclusion
-- One crisp closing statement on why this matters for India's development or UPSC perspective.
-
-Be factual, structured, and UPSC Prelims + Mains focused. Avoid unnecessary padding."""
-                                        summary = ask_llm(prompt)
-                                        st.session_state["news_summaries"][title] = summary
-                                        
-                                        # ── Save summary to database ────────
-                                        summary_content = f"**TITLE:** {title}\n\n{summary}"
-                                        if url:
-                                            summary_content += f"\n\n**SOURCE:** {url}"
-                                        save_item("CA News Summary", summary_content)
-                                
-                                # ── Display the summary ────────────────
-                                st.markdown(st.session_state["news_summaries"][title])
-                                
-                                # ── Show source URL ────────────────────
-                                if url:
-                                    st.markdown(
-                                        f'<div style="margin-top:12px;padding:10px 14px;background:#16162a;'
-                                        f'border-radius:8px;border:1px solid #312e81;">'
-                                        f'🔗 <strong>Source:</strong> <a href="{url}" target="_blank" style="color:#a78bfa;word-break:break-all;">'
-                                        f'{url[:80]}...</a></div>',
-                                        unsafe_allow_html=True
-                                    )
+        def render_news_feed(items, key_prefix):
+            if not items:
+                st.info("No items found in this section.")
+                return
+            
+            feed_dates = sorted(list(set(n[2] for n in items)), reverse=True)
+            for d in feed_dates:
+                day_items = [n for n in items if n[2] == d and not is_filtered(n[0])]
+                if day_items:
+                    with st.expander(f"📅 {d} ({len(day_items)} items)", expanded=False):
+                        for idx, n in enumerate(day_items):
+                            title_val    = n[0]
+                            content_val  = n[1]
+                            url_val      = n[3]
+                            source_val   = str(n[4] or "Other")
+                            category_val = str(n[5] or "General") if len(n) > 5 else "General"
                             
+                            news_key = f"{key_prefix}_{d}_{idx}"
+                            exp_key = f"news_exp_{news_key}"
+                            
+                            col_t, col_b = st.columns([9, 1])
+                            with col_t:
+                                s_color = SOURCE_COLORS.get(source_val.lower(), DEFAULT_COLOR)
+                                badge = f'<span style="background:{s_color};color:white;font-size:10px;padding:2px 8px;border-radius:10px;margin-right:8px;font-weight:700;">{source_val.upper()}</span>'
+                                cat_badge = f'<span style="color:#94a3b8;font-size:10px;border:1px solid #334155;padding:1px 6px;border-radius:4px;margin-right:8px;">{category_val}</span>'
+                                st.markdown(f"**• {badge}{cat_badge}{title_val}**", unsafe_allow_html=True)
+                            with col_b:
+                                if st.button("🔍" if not st.session_state.get(exp_key) else "✕", key=f"btn_{news_key}"):
+                                    st.session_state[exp_key] = not st.session_state.get(exp_key, False)
+                                    safe_rerun()
+                            
+                            if st.session_state.get(exp_key):
+                                with st.container():
+                                    st.markdown('<div style="background:#1e1e2e;border:1px solid #334155;border-radius:8px;padding:15px;margin-bottom:15px;">', unsafe_allow_html=True)
+                                    
+                                    if title_val not in st.session_state["news_summaries"]:
+                                        with st.spinner("🤖 Analyzing..."):
+                                            is_deep = "editorial" in category_val.lower() or "explained" in category_val.lower() or "editorial" in title_val.lower() or \
+                                                      any(kw in source_val.lower() for kw in ["hindu", "express", "mint", "standard"])
+                                            
+                                            raw_text = ""
+                                            if is_deep and url_val:
+                                                st.caption("🔗 Fetching full article content...")
+                                                suc, ft = fetch_full_news_content(url_val)
+                                                raw_text = ft if suc else (content_val or title_val)
+                                            else:
+                                                raw_text = content_val or title_val
+                                                
+                                            prompt_text = f"Analyze for UPSC:\nTITLE: {title_val}\nCONTENT: {raw_text}\n\nFormat with: One-Liner, Relevant Articles/Acts, Background, Important Points, Challenges, Way Forward, Conclusion."
+                                            st.session_state["news_summaries"][title_val] = ask_llm(prompt_text)
+                                    
+                                    st.markdown(st.session_state["news_summaries"][title_val])
+                                    if url_val: st.markdown(f"[🔗 Read Full Article]({url_val})")
+                                    st.markdown('</div>', unsafe_allow_html=True)
                             st.markdown("---")
+
+        with tab_all:
+            render_news_feed(unique_news, "all")
+        with tab_editorial:
+            ed_items = [n for n in unique_news if n[5] and str(n[5]).lower() in ["editorial", "opinion"]]
+            render_news_feed(ed_items, "editorial")
+        with tab_explained:
+            ex_items = [n for n in unique_news if n[5] and str(n[5]).lower() == "explained"]
+            render_news_feed(ex_items, "explained")
+        with tab_pib:
+            pib_items = [n for n in unique_news if n[4] and "pib" in str(n[4]).lower()]
+            render_news_feed(pib_items, "pib")
     else:
-        st.info("No Current Affairs data available. Please refresh to fetch current affairs.")
+        st.info("""
+        📭 **No Current Affairs data available**
+        
+        **Next steps:**
+        1. Click **🔄 Refresh Content** button above to fetch the latest news
+        2. Wait for the process to complete (may take 30-60 seconds)
+        3. If still empty, check you haven't filtered all items in "Manage Filters"
+        """)
 
     # ── Bottom Controls: Retention Rules + Manage Filters ──────────────────────
     st.markdown("---")
@@ -343,7 +451,11 @@ elif page == "CA Quiz":
     if st.button("Generate Quiz"):
         data = get_news()
         if not data:
-            st.warning("No current affairs data available. Please refresh first.")
+            st.warning("""
+            ⚠️ **No current affairs data available**
+            
+            Go to **Current Affairs** tab → Click **🔄 Refresh Content** to fetch the latest news first!
+            """)
         else:
             data = sorted(data, key=lambda x: x[2], reverse=True)
             text = "\n".join([x[0] for x in data[:20]])
@@ -1119,10 +1231,818 @@ elif page == "Results":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#   ASK ESU - PERSONALIZED STUDY PLANNING
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Ask Esu":
+    st.subheader("🤖 Ask Esu - Your Personal Study Plan & AI Guide")
+    st.caption("Provide a prompt and your exam date, and Esu will generate a personalized study plan, workflow, practice strategy, and comprehensive AI analysis based on your quiz data and UPSC PYQ trends.")
+    
+    st.markdown("---")
+    
+    # ── Exam Type Selection ───────────────────────────────────────────────────
+    st.markdown("### 📌 Select Your Target Exam")
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        exam_type = st.radio(
+            "Target Exam Type:",
+            ("UPSC Prelims", "UPSC Mains"),
+            horizontal=True,
+            label_visibility="collapsed"
+        )
+        exam_type = "prelims" if exam_type == "UPSC Prelims" else "mains"
+    
+    st.markdown("---")
+    
+    # ── Study Plan Input Section ──────────────────────────────────────────────
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.markdown("### 📝 Your Query/Prompt")
+        user_prompt = st.text_area(
+            "Describe your study goals, challenges, or specific areas you want help with:",
+            placeholder="E.g., 'I'm weak in Current Affairs and want a plan to improve before UPSC Prelims'",
+            height=100,
+            key="esu_prompt",
+            label_visibility="collapsed"
+        )
+    
+    with col2:
+        st.markdown("### 📅 Exam Date (Optional)")
+        exam_date = st.date_input(
+            "Select your target exam date:",
+            value=None,
+            key="esu_exam_date",
+            label_visibility="collapsed"
+        )
+        
+        if exam_date:
+            days_left = (exam_date - datetime.now().date()).days
+            if days_left < 0:
+                st.error(f"❌ Exam date is in the past!")
+            else:
+                st.success(f"✅ {days_left} days left")
+    
+    st.markdown("---")
+    
+    # ── Generate Study Plan Button ────────────────────────────────────────────
+    if st.button("🚀 Generate Personalized Study Plan", type="primary", use_container_width=True, key="btn_generate_study_plan"):
+        if not user_prompt.strip():
+            st.error("❌ Please provide a prompt to proceed.")
+        else:
+            with st.spinner("🤖 Esu is analyzing your performance and generating your study plan..."):
+                # Get quiz results
+                results = get_results()
+                
+                # Analyze performance
+                quiz_analysis = analyze_quiz_performance(results)
+                
+                # Convert exam date to datetime if provided
+                exam_datetime = None
+                if exam_date:
+                    exam_datetime = datetime.combine(exam_date, datetime.min.time())
+                
+                # Generate study plan with exam type
+                study_plan = generate_personalized_study_plan(user_prompt, quiz_analysis, exam_datetime, exam_type)
+                
+                # Generate performance summary with exam type
+                performance_summary = generate_performance_summary(quiz_analysis, exam_type)
+                
+                # Save to session state
+                st.session_state["study_plan_output"] = format_study_plan_output(
+                    study_plan, performance_summary, quiz_analysis
+                )
+                st.session_state["study_plan_generated"] = True
+                st.success("✅ Study plan generated successfully!")
+                safe_rerun()
+    
+    st.markdown("---")
+    
+    # ── Display Generated Study Plan ──────────────────────────────────────────
+    if st.session_state.get("study_plan_generated"):
+        output = st.session_state.get("study_plan_output", {})
+        
+        # ── Create Tabs for different sections ─────────────────────────────────
+        tab_plan, tab_summary, tab_metrics, tab_pyq, tab_full = st.tabs([
+            "📚 Study Plan",
+            "📊 Performance Summary",
+            "📈 Your Current Data",
+            "📌 UPSC PYQ Trends",
+            "📄 Full Report"
+        ])
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        #   STUDY PLAN TAB
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        with tab_plan:
+            st.markdown(output.get("study_plan", "No study plan generated"))
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        #   PERFORMANCE SUMMARY TAB
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        with tab_summary:
+            st.markdown(output.get("performance_summary", "No performance summary generated"))
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        #   CURRENT DATA TAB (with dropdowns for each section)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        with tab_metrics:
+            analysis = output.get("quiz_analysis", {})
+            
+            if analysis.get("total_quizzes", 0) > 0:
+                # Overall Metrics - Collapsible
+                with st.expander("📊 Overall Metrics", expanded=True):
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("Total Quizzes", analysis.get("total_quizzes", 0))
+                    with col2:
+                        st.metric("Overall Accuracy", f"{analysis.get('overall_accuracy', 0)}%")
+                    with col3:
+                        st.metric("Total Marks", round(analysis.get("total_marks", 0), 2))
+                    with col4:
+                        st.metric("Accuracy Trend", f"avg: {round(sum(analysis.get('accuracy_trend', [0]))/max(len(analysis.get('accuracy_trend', [1])),1), 2)}%")
+                
+                # Subject-wise breakdown - Collapsible
+                with st.expander("🎯 Subject-Wise Breakdown", expanded=False):
+                    metrics_data = []
+                    for quiz_type, metrics in analysis.get("by_quiz_type", {}).items():
+                        metrics_data.append({
+                            "Subject/Quiz Type": quiz_type,
+                            "Quizzes": metrics.get("quiz_count", 0),
+                            "Avg Accuracy": f"{metrics.get('average_accuracy', 0)}%",
+                            "Total Marks": round(metrics.get("total_marks", 0), 2),
+                            "Correct": metrics.get("total_correct", 0),
+                            "Attempted": metrics.get("total_attempted", 0)
+                        })
+                    
+                    if metrics_data:
+                        df_metrics = pd.DataFrame(metrics_data)
+                        st.dataframe(df_metrics, use_container_width=True)
+                
+                # Strengths and Weaknesses - Collapsible
+                with st.expander("💪 Strengths & Areas for Improvement", expanded=False):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("### 💪 Strengths")
+                        strong = analysis.get("strong_areas", [])
+                        if strong:
+                            for area in strong:
+                                st.success(f"✅ {area}")
+                                metrics = analysis.get("by_quiz_type", {}).get(area, {})
+                                st.caption(f"Accuracy: {metrics.get('average_accuracy', 0)}%")
+                        else:
+                            st.info("No strong areas identified yet. Keep practicing!")
+                    
+                    with col2:
+                        st.markdown("### 🎯 Areas for Improvement")
+                        weak = analysis.get("weak_areas", [])
+                        if weak:
+                            for area in weak:
+                                st.warning(f"⚠️ {area}")
+                                metrics = analysis.get("by_quiz_type", {}).get(area, {})
+                                st.caption(f"Accuracy: {metrics.get('average_accuracy', 0)}%")
+                        else:
+                            st.info("No weak areas identified. Great job!")
+            else:
+                st.info("📊 No quiz data available for analysis. Start by taking some quizzes!")
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        #   UPSC PYQ TRENDS TAB
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        with tab_pyq:
+            pyq_data = load_pyq_data()
+            if pyq_data:
+                # Select Exam Type
+                pyq_exam_type = st.radio(
+                    "Select Exam Type:",
+                    ("UPSC Prelims", "UPSC Mains"),
+                    horizontal=True,
+                    key="pyq_exam_selector"
+                )
+                pyq_exam_type = "prelims" if pyq_exam_type == "UPSC Prelims" else "mains"
+                if pyq_exam_type == "prelims" and "prelims" in pyq_data:
+                    prelims_data = pyq_data["prelims"]
+                    with st.expander("🏆 Most Important Subjects (By PYQ Frequency)", expanded=True):
+                        for subject in prelims_data.get("subjects", []):
+                            col1, col2 = st.columns([2, 1])
+                            with col1:
+                                st.markdown(f"**{subject.get('rank')}. {subject.get('name')}**")
+                            with col2:
+                                st.metric("Difficulty", subject.get('difficulty', 'N/A'))
+                            chapters = subject.get('important_chapters', [])
+                            if chapters:
+                                st.markdown(f"**Key Topics:** {', '.join(chapters[:8])}")
+                            st.markdown("---")
+                elif pyq_exam_type == "mains" and "mains" in pyq_data:
+                    mains_data = pyq_data["mains"]
+                    with st.expander("🏆 Most Important Papers (By PYQ Frequency)", expanded=True):
+                        for paper in mains_data.get("subjects", []):
+                            col1, col2 = st.columns([2, 1])
+                            with col1:
+                                st.markdown(f"**{paper.get('rank')}. {paper.get('name')}**")
+                            with col2:
+                                st.metric("Questions", paper.get('total_questions', 'N/A'))
+                            chapters = paper.get('important_chapters', [])
+                            if chapters:
+                                st.markdown(f"**Key Topics:** {', '.join(chapters[:8])}")
+                            st.markdown("---")
+                with st.expander("📊 Recent Trends & Patterns", expanded=False):
+                    if "trends" in pyq_data:
+                        trends = pyq_data["trends"].get(pyq_exam_type, {})
+                        if trends:
+                            if "question_pattern_changes" in trends:
+                                st.markdown("**Recent Question Pattern Changes:**")
+                                for trend in trends.get("question_pattern_changes", []):
+                                    st.markdown(f"• {trend}")
+                            if "high_frequency_topics" in trends:
+                                st.markdown("**High Frequency Topics:**")
+                                for topic in trends.get("high_frequency_topics", [])[:10]:
+                                    st.markdown(f"• {topic}")
+                        else:
+                            st.info("Trend data not available yet.")
+                    else:
+                        st.info("PYQ trend data will be updated weekly.")
+            else:
+                st.error("❌ Could not load PYQ data. Please ensure pyq_data.json exists.")
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        #   FULL REPORT TAB
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        with tab_full:
+            st.markdown("## 📋 Complete Study Plan & Analysis Report")
+            st.markdown("---")
+            
+            st.markdown("### Executive Summary")
+            st.markdown(output.get("study_plan", "").split("\n\n")[0] if output.get("study_plan") else "")
+            
+            st.markdown("---")
+            st.markdown(output.get("study_plan", "No study plan generated"))
+            
+            st.markdown("---")
+            st.markdown("## Performance Analysis")
+            st.markdown(output.get("performance_summary", "No performance summary generated"))
+        
+        st.markdown("---")
+        
+        st.markdown("---")
+
+        # ── Save Report to DB ────────────────────────────────────────────────
+        st.markdown("### 💾 Save This Report")
+        col_save, col_reset = st.columns([1, 1])
+
+        with col_save:
+            if st.button("💾 Save Report to Database", type="primary", use_container_width=True):
+                period_label = f"Prompt: {user_prompt[:60]}{'...' if len(user_prompt) > 60 else ''}"
+                full_report = (
+                    f"**USER PROMPT:** {user_prompt}\n"
+                    f"**EXAM DATE:** {exam_date if exam_date else 'Not specified'}\n\n"
+                    f"---\n## Study Plan\n\n"
+                    f"{output.get('study_plan', '')}\n\n"
+                    f"---\n## Performance Summary\n\n"
+                    f"{output.get('performance_summary', '')}"
+                )
+                report_id = save_ai_report("Esu Study Plan", period_label, full_report)
+                if report_id:
+                    st.success(f"✅ Report saved to database! (ID: {report_id})")
+                else:
+                    st.error("❌ Failed to save. Check DB connection.")
+
+        with col_reset:
+            if st.button("🔄 Generate New Study Plan", use_container_width=True):
+                st.session_state["study_plan_generated"] = False
+                st.session_state["study_plan_output"] = {}
+                safe_rerun()
+    # ── Saved Esu Reports ─────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📁 Saved Esu Study Plans")
+    esu_reports = [r for r in get_ai_reports() if r[1] == "Esu Study Plan"]
+
+    if esu_reports:
+        esu_options = [
+            f"[{r[2][:50]}] – {r[4].strftime('%d %b %Y %H:%M') if hasattr(r[4], 'strftime') else str(r[4])}"
+            for r in esu_reports
+        ]
+        sel_esu_report = st.selectbox("Select a saved plan", [""] + esu_options, key="sel_esu_report")
+
+        if sel_esu_report:
+            ridx = esu_options.index(sel_esu_report)
+            report = esu_reports[ridx]
+            report_id = report[0]
+            report_content = report[3]
+
+            col_h, col_x = st.columns([20, 1])
+            with col_x:
+                st.button("✕", key=f"x_esu_{report_id}", help="Close",
+                          on_click=clear_state, args=("sel_esu_report",))
+            with col_h:
+                st.markdown(f"**Context:** {report[2]}")
+
+            st.markdown(report_content)
+
+            if st.button("🗑️ Delete This Report", key=f"del_esu_{report_id}"):
+                st.session_state[f"confirm_del_esu_{report_id}"] = True
+                safe_rerun()
+            if st.session_state.get(f"confirm_del_esu_{report_id}"):
+                st.warning("Permanently delete this study plan report?")
+                c1, c2 = st.columns(2)
+                if c1.button("Yes, Delete", key=f"yes_esu_{report_id}"):
+                    delete_ai_report(report_id)
+                    st.session_state[f"confirm_del_esu_{report_id}"] = False
+                    safe_rerun()
+                if c2.button("Cancel", key=f"no_esu_{report_id}"):
+                    st.session_state[f"confirm_del_esu_{report_id}"] = False
+                    safe_rerun()
+    else:
+        st.info("No saved Esu study plans yet. Generate and save one above.")
+
+    if not st.session_state.get("study_plan_generated"):
+        if st.session_state.get("show_esu_welcome", True):
+            st.info("""
+            👋 **Welcome to Ask Esu!**
+            
+            Esu is your personal AI study guide. Here's what Esu does:
+            
+            1. **📚 Analyzes Your Performance** - Reviews all your quiz results across different subjects
+            2. **🎯 Creates Personalized Plans** - Based on your strengths, weaknesses, and goals
+            3. **📅 Time-Bound Strategy** - If you provide an exam date, Esu creates a deadline-aware study schedule
+            4. **💡 Workflow & Tactics** - Gives you daily routines, practice strategies, and exam-cracking techniques
+            5. **📊 Detailed Analytics** - Provides comprehensive performance analysis and metrics
+            
+            **To get started:**
+            - Share what you're struggling with or your study goals
+            - (Optional) Enter your target exam date
+            - Click "Generate Personalized Study Plan"
+            
+            Esu will then create a complete study roadmap just for you!
+            """)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#   CRISP SUMMARIZER - Summarize Any URLs
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Summarizer":
+    st.subheader("📄 Summarizer - UPSC Resources from Coaching Institutes")
+    
+    st.markdown("---")
+    
+    # Create tabs
+    tab_urls, tab_text, tab_pdf, tab_saved, tab_quiz = st.tabs(["📝 Summarize Articles", "✍️ Text Summary", "📄 PDF Summary", "📚 Saved Summaries", "📋 Quiz from Summaries"])
+    
+    # ── TAB 1: SUMMARIZE ARTICLES ──────────────────────────────────────────
+    with tab_urls:
+        st.info("📌 Paste coaching institute article URLs (one per line). System will auto-generate crisp summaries with NCERT connections.")
+        
+        urls_input = st.text_area(
+            "Paste article URLs from coaching institutes",
+            height=150,
+            placeholder="https://nextias.com/article-name\nhttps://visionias.in/topic-name\nhttps://vajiramandravi.com/current-affairs\nhttps://forumias.com/blog\nhttps://www.pmfias.com/article-6-of-paris-agreement/topic-name"
+        )
+        
+        # Optional subject input
+        custom_subject = st.text_input(
+            "📚 Subject/Topic (optional - leave empty for auto-detection)",
+            placeholder="e.g., National Education, Economy, Policing",
+            help="If you provide a subject, it will be associated with these summaries"
+        )
+        
+        if st.button("🚀 Generate Summaries", use_container_width=True, key="btn_gen_summaries"):
+            if urls_input.strip():
+                urls = [url.strip() for url in urls_input.split('\n') if url.strip()]
+                
+                if urls:
+                    progress_bar = st.progress(0)
+                    summarizer = URLSummarizer()
+                    
+                    for idx, url in enumerate(urls):
+                        with st.spinner(f"📥 Processing ({idx+1}/{len(urls)})..."):
+                            title, summary, source, error = summarizer.summarize_url(url)
+                            
+                            if error:
+                                st.error(f"**❌ {source}** - {error}")
+                            else:
+                                # Auto-extract subject if not provided
+                                subject = custom_subject if custom_subject else extract_subject_from_title(title)
+                                
+                                # Save to database with subject
+                                save_id = save_url_summary(url, title, summary, subject)
+                                
+                                # Display success
+                                st.success(f"✅ **{source}** - {title}\n📚 Subject: {subject}")
+                                
+                                # Display summary
+                                with st.expander(f"📖 View Summary", expanded=True):
+                                    st.markdown(summary)
+                                    
+                                    # Save button (if not already saved)
+                                    col_save_gen, col_copy_gen = st.columns(2)
+                                    with col_save_gen:
+                                        st.caption("✅ Auto-saved to Saved Summaries")
+                                    with col_copy_gen:
+                                        if st.button("📋 Copy", key=f"copy_article_{save_id}"):
+                                            st.caption("✓ Copied!")
+                        
+                        progress_bar.progress((idx + 1) / len(urls))
+                    
+                    st.info("✅ All summaries generated and saved!")
+            else:
+                st.warning("⚠️ Please paste at least one URL")
+    
+    
+    
+    
+    # ── TAB 3: TEXT SUMMARY ────────────────────────────────────────────────
+    with tab_text:
+        st.subheader("✍️ Paste Text & Get Crisp Summary")
+        st.info("📌 Paste any article, news, or research text and get a concise UPSC-focused summary.")
+        
+        # Text input
+        text_input = st.text_area(
+            "Paste your text here:",
+            height=200,
+            placeholder="Paste article content, research material, or any text you want to summarize...",
+            key="text_summary_area"
+        )
+        
+        # Summary style selection
+        col_style, col_btn = st.columns([0.5, 0.5])
+        with col_style:
+            summary_style = st.radio(
+                "Summary Style:",
+                ["Syllabus Format", "Detailed"],
+                horizontal=True,
+                help="Choose how you want the summary to be formatted",
+                key="text_style_radio_v3"
+            )
+        
+        with col_btn:
+            st.write("")
+            if st.button("🚀 Generate Summary", use_container_width=True, key="btn_text_summary"):
+                if text_input.strip():
+                    st.session_state['generating_text_summary'] = True
+                    st.session_state['text_summary_saved_id'] = None 
+                else:
+                    st.warning("⚠️ Please paste some text first")
+        
+        # Generate text summary
+        if st.session_state.get('generating_text_summary'):
+            with st.spinner("🤖 Generating crisp summary..."):
+                style_prompts = {
+                    "Detailed": """Analyze the following text and provide a comprehensive UPSC-focused summary with:
+- Key facts and figures
+- Relevant constitutional or policy background
+- Implications and impact
+- Questions this might generate for UPSC Prelims/Mains
+- **📚 NCERT Links**: Mention relevant Class, Subject, and Chapter connections.
+
+Keep it detailed but structured.""",
+                    "Syllabus Format": """Analyze the following text using this EXACT format:
+## 📌 One-Liner
+(One crisp sentence summary)
+
+## ✍️ Crisp & Concise Summary
+(3-4 high-impact bullet points summarizing the essence)
+
+## 🏛️ Relevant Articles/Acts
+(List constitutional provisions, acts, or policies)
+
+## ⭐ Key Points
+(3-5 bullet points with key facts)
+
+## 📚 NCERT Links
+Class [X] [Subject] → Chapter: [Name]
+Connection: [1-2 lines how it connects]
+
+## 🎓 GS Paper Relevance
+(Which GS paper: GS1/GS2/GS3/GS4, and Essay topic if applicable)
+
+## ⚠️ Key Issues
+(Main challenges or concerns)"""
+                }
+                
+                full_prompt = f"""{style_prompts.get(summary_style, style_prompts['Detailed'])}
+
+---
+**TEXT TO SUMMARIZE:**
+
+{text_input[:11000]}
+
+---
+
+Provide the summary now. 
+ALSO, on the very last line, strictly provide a suggested title and a suggested subject category (from: Economy, Polity, Environment, S&T, IR, History, Social, Health, Education, Agriculture) in this format: 
+METADATA: Title: [Your Title] | Subject: [Your Subject]"""
+                
+                resp = ask_llm(full_prompt)
+                
+                if "METADATA:" in resp:
+                    st.session_state['text_summary'] = resp.split("METADATA:")[0].strip()
+                    meta = resp.split("METADATA:")[1].strip()
+                    try:
+                        st.session_state['text_summary_auto_title'] = meta.split("|")[0].replace("Title:", "").strip()
+                        st.session_state['text_summary_auto_subj'] = meta.split("|")[1].replace("Subject:", "").strip()
+                    except:
+                        st.session_state['text_summary_auto_title'] = f"Text Summary - {datetime.now().strftime('%Y-%m-%d')}"
+                        st.session_state['text_summary_auto_subj'] = "General"
+                else:
+                    st.session_state['text_summary'] = resp
+                    st.session_state['text_summary_auto_title'] = f"Text Summary - {datetime.now().strftime('%Y-%m-%d')}"
+                    st.session_state['text_summary_auto_subj'] = "General"
+                st.session_state['generating_text_summary'] = False
+        
+        # Display and save text summary
+        if st.session_state.get('text_summary'):
+            st.markdown("---")
+            st.markdown("**📊 Summary:**")
+            st.markdown(st.session_state['text_summary'])
+            
+            st.markdown("### 🏷️ Summary Info")
+            col_t, col_s = st.columns(2)
+            with col_t:
+                final_title = st.text_input("Summary Title:", value=st.session_state.get('text_summary_auto_title', ""), key="text_final_title")
+            with col_s:
+                final_subject = st.text_input("Subject Category:", value=st.session_state.get('text_summary_auto_subj', ""), key="text_final_subj")
+            
+            col_save, col_del, col_clear = st.columns(3)
+            with col_save:
+                if not st.session_state.get('text_summary_saved_id'):
+                    if st.button("💾 Save to Resources", use_container_width=True, key="save_text_summary"):
+                        u_url = f"text_input_{int(time.time())}"
+                        s_id = save_url_summary(u_url, final_title, st.session_state['text_summary'], final_subject)
+                        if s_id:
+                            st.session_state['text_summary_saved_id'] = s_id
+                            st.success("✅ Saved!")
+                            time.sleep(0.5)
+                            safe_rerun()
+                else: st.success("✅ Already Saved")
+            
+            with col_del:
+                saved_id = st.session_state.get('text_summary_saved_id')
+                if saved_id:
+                    if st.button("🗑️ Delete Save", use_container_width=True, key="del_text_summary_btn"):
+                        delete_url_summary(saved_id)
+                        st.session_state['text_summary_saved_id'] = None
+                        st.warning("Deleted.")
+                        time.sleep(0.5)
+                        safe_rerun()
+                else: st.button("🗑️ Delete", use_container_width=True, disabled=True, key="del_text_dis")
+            
+            with col_clear:
+                if st.button("🔄 Clear All", use_container_width=True, key="clear_text_summary"):
+                    st.session_state['text_summary'] = None
+                    st.session_state['text_summary_saved_id'] = None
+                    safe_rerun()
+    
+    # ── TAB 4: PDF SUMMARY ─────────────────────────────────────────────────
+    with tab_pdf:
+        st.subheader("📄 Upload PDF & Get Summary by Page Range")
+        st.info("📌 Upload a PDF file, select page range, and get a crisp UPSC-focused summary.")
+        
+        pdf_file = st.file_uploader("Choose a PDF file:", type="pdf", key="pdf_summary_uploader_final")
+        if pdf_file:
+            try:
+                reader = PyPDF2.PdfReader(pdf_file)
+                total_pages = len(reader.pages)
+                st.info(f"📄 PDF loaded: **{pdf_file.name}**. Total pages: {total_pages}")
+                
+                col_from, col_to = st.columns(2)
+                with col_from: from_page = st.number_input("From Page:", min_value=1, max_value=total_pages, value=1, key="pdf_from_page_final")
+                with col_to: to_page = st.number_input("To Page:", min_value=1, max_value=total_pages, value=min(5, total_pages), key="pdf_to_page_final")
+                
+                if from_page > to_page: st.warning("⚠️ 'From Page' should be less than or equal to 'To Page'")
+                else: st.success(f"✅ Will summarize pages {from_page} to {to_page} ({to_page - from_page + 1} pages)")
+                
+                col_style, col_btn = st.columns([0.5, 0.5])
+                with col_style: pdf_style = st.radio("Summary Style:", ["Syllabus Format", "Detailed"], horizontal=True, key="pdf_summary_style_v3")
+                
+                with col_btn:
+                    st.write("")
+                    if st.button("🚀 Generate Summary", use_container_width=True, key="btn_pdf_summary_final"):
+                        if from_page <= to_page:
+                            st.session_state['generating_pdf_summary'] = True
+                            st.session_state['pdf_summary_saved_id'] = None
+                        else: st.error("❌ Invalid page range")
+                
+                if st.session_state.get('generating_pdf_summary'):
+                    with st.spinner(f"📥 Extracting text..."):
+                        pdf_extracted_text = ""
+                        for page_num in range(int(from_page) - 1, int(to_page)):
+                            pdf_extracted_text += reader.pages[page_num].extract_text() + "\n"
+                        
+                        if not pdf_extracted_text.strip():
+                            st.error("❌ Could not extract text.")
+                            st.session_state['generating_pdf_summary'] = False
+                        else:
+                            with st.spinner("🤖 Generating summary..."):
+                                pdf_style_prompts = {
+                                    "Detailed": """Analyze the following text and provide a comprehensive UPSC-focused summary with:
+- Key facts and figures
+- Relevant constitutional or policy background
+- Implications and impact
+- Questions this might generate for UPSC Prelims/Mains
+- **📚 NCERT Links**: Mention relevant Class, Subject, and Chapter connections.
+
+Keep it detailed but structured.""",
+                                    "Syllabus Format": """Analyze the following text using this EXACT format:
+## 📌 One-Liner
+(One crisp sentence summary)
+
+## ✍️ Crisp & Concise Summary
+(3-4 high-impact bullet points summarizing the essence)
+
+## 🏛️ Relevant Articles/Acts
+(List constitutional provisions, acts, or policies)
+
+## ⭐ Key Points
+(3-5 bullet points with key facts)
+
+## 📚 NCERT Links
+Class [X] [Subject] → Chapter: [Name]
+Connection: [1-2 lines how it connects]
+
+## 🎓 GS Paper Relevance
+(Which GS paper: GS1/GS2/GS3/GS4, and Essay topic if applicable)
+
+## ⚠️ Key Issues
+(Main challenges or concerns)"""
+                                }
+                                pdf_meta_prompt = f"""{pdf_style_prompts.get(pdf_style)}
+---
+**PDF CONTENT:** {pdf_extracted_text[:11000]}
+---
+Provide the summary now. ALSO, on the very last line, strictly provide METADATA: Title: [Your Title] | Subject: [Your Subject]"""
+                                pdf_resp = ask_llm(pdf_meta_prompt)
+                                if "METADATA:" in pdf_resp:
+                                    st.session_state['pdf_summary'] = pdf_resp.split("METADATA:")[0].strip()
+                                    meta = pdf_resp.split("METADATA:")[1].strip()
+                                    st.session_state['pdf_auto_title'] = meta.split("|")[0].replace("Title:", "").strip()
+                                    st.session_state['pdf_auto_subj'] = meta.split("|")[1].replace("Subject:", "").strip()
+                                else:
+                                    st.session_state['pdf_summary'] = pdf_resp
+                                    st.session_state['pdf_auto_title'] = f"{pdf_file.name} (p.{from_page}-{to_page})"
+                                    st.session_state['pdf_auto_subj'] = "General"
+                                st.session_state['pdf_pages_attr'] = f"{from_page}-{to_page}"
+                                st.session_state['generating_pdf_summary'] = False
+                
+                if st.session_state.get('pdf_summary'):
+                    st.markdown("---")
+                    st.markdown(f"**📊 Summary ({pdf_file.name}, Pages {st.session_state.get('pdf_pages_attr', '?')}):**")
+                    st.markdown(st.session_state['pdf_summary'])
+                    
+                    st.markdown("### 🏷️ Summary Info")
+                    col_pt, col_ps = st.columns(2)
+                    with col_pt: pdf_title = st.text_input("Summary Title:", value=st.session_state.get('pdf_auto_title', ""), key="pdf_final_title")
+                    with col_ps: pdf_subj = st.text_input("Subject Category:", value=st.session_state.get('pdf_auto_subj', ""), key="pdf_final_subj")
+
+                    col_psave, col_pdel, col_pclear = st.columns(3)
+                    with col_psave:
+                        if not st.session_state.get('pdf_summary_saved_id'):
+                            if st.button("💾 Save to Resources", use_container_width=True, key="save_pdf_summary_btn"):
+                                u_url = f"pdf_upload_{pdf_file.name}_{int(time.time())}"
+                                p_id = save_url_summary(u_url, pdf_title, st.session_state['pdf_summary'], pdf_subj)
+                                if p_id:
+                                    st.session_state['pdf_summary_saved_id'] = p_id; st.success("✅ Saved!"); time.sleep(0.5); safe_rerun()
+                        else: st.success("✅ Already Saved")
+                    with col_pdel:
+                        if st.session_state.get('pdf_summary_saved_id'):
+                            saved_id_to_del = st.session_state.get('pdf_summary_saved_id')
+                            if st.button("🗑️ Delete Save", use_container_width=True, key="del_pdf_summary_btn"):
+                                delete_url_summary(saved_id_to_del)
+                                st.session_state['pdf_summary_saved_id'] = None
+                                st.warning("Deleted."); time.sleep(0.5); safe_rerun()
+                        else: st.button("🗑️ Delete", use_container_width=True, disabled=True, key="del_pdf_dis")
+                    with col_pclear:
+                        if st.button("🔄 Clear All", use_container_width=True, key="clear_pdf_summary_btn"):
+                            st.session_state['pdf_summary'] = None; st.session_state['pdf_summary_saved_id'] = None; safe_rerun()
+            except Exception as e: st.error(f"❌ PDF Error: {e}")
+
+
+    # ── TAB 4: SAVED SUMMARIES ─────────────────────────────────────────────
+    with tab_saved:
+        st.subheader("📚 Your Saved Summaries")
+        saved_summaries = get_url_summaries(limit=100)
+        if saved_summaries:
+            col_filter1, col_filter2 = st.columns([0.7, 0.3])
+            with col_filter2:
+                if st.button("🔄 Refresh", use_container_width=True, key="refresh_saved"):
+                    safe_rerun()
+            for summary_id, url, title, subject, summary_text, created_at in saved_summaries:
+                col_exp, col_btns = st.columns([0.85, 0.15])
+                with col_exp:
+                    with st.expander(f"📄 {title} • {subject} ({created_at.strftime('%Y-%m-%d') if created_at else 'Unknown'})"):
+                        st.markdown(summary_text)
+                        st.caption(f"🔗 Source: {url}"); st.caption(f"📚 Subject: {subject}")
+                with col_btns:
+                    if st.button("🗑️", key=f"del_btn_{summary_id}", help="Delete this summary"):
+                        col_yes, col_no = st.columns(2)
+                        with col_yes:
+                            if st.button("YES", key=f"yes_{summary_id}"):
+                                delete_url_summary(summary_id); st.success("Deleted!"); time.sleep(0.5); safe_rerun()
+                        with col_no:
+                            if st.button("NO", key=f"no_{summary_id}"): st.info("Cancelled")
+        else:
+            st.info("📭 No saved summaries yet. Start by summarizing article URLs or text!")
+
+    # ── TAB 5: QUIZ FROM SUMMARIES ─────────────────────────────────────────
+    with tab_quiz:
+        st.subheader("📋 Generate Quiz from Summaries")
+        saved_summaries_all = get_url_summaries(limit=100)
+        if not saved_summaries_all: st.warning("⚠️ No saved summaries available.")
+        else:
+            st.markdown("### 🔍 Filter Summaries")
+            source_filter = st.selectbox("Show summaries from:", ["All Sources", "Web Articles", "Text Inputs", "PDF Uploads"], key="quiz_source_filter")
+            filtered_summaries = []
+            for s in saved_summaries_all:
+                url = s[1]
+                if source_filter == "All Sources": filtered_summaries.append(s)
+                elif source_filter == "Web Articles" and url.startswith("http"): filtered_summaries.append(s)
+                elif source_filter == "Text Inputs" and url.startswith("text_input"): filtered_summaries.append(s)
+                elif source_filter == "PDF Uploads" and url.startswith("pdf_upload"): filtered_summaries.append(s)
+            
+            if not filtered_summaries: st.info(f"No summaries found.")
+            else:
+                summary_options = {}
+                for summary_id, url, title, subject, summary_text, created_at in filtered_summaries:
+                    stype = "Article"
+                    if url.startswith("text_input"): stype = "Text"
+                    elif url.startswith("pdf_upload"): stype = "PDF"
+                    display_text = f"[{stype}] {title} ({created_at.strftime('%Y-%m-%d') if created_at else 'Unknown'})"
+                    summary_options[display_text] = (summary_id, title, subject, summary_text)
+                
+                selected_summary = st.selectbox("Select summary to create quiz from:", list(summary_options.keys()), key="article_quiz_select_multi")
+                if selected_summary:
+                    summary_id, title, auto_subject, summary_text = summary_options[selected_summary]
+                    col_subj1, col_subj2 = st.columns([0.6, 0.4])
+                    with col_subj1:
+                        custom_subject_quiz = st.text_input("📚 Subject for Quiz Results", value=auto_subject or "", key="quiz_override_subj")
+                    with col_subj2:
+                        st.write("")
+                        if st.button("ℹ️ Auto-detect", use_container_width=True, key="quiz_auto_subj"):
+                            custom_subject_quiz = extract_subject_from_title(title)
+                    final_subject_quiz = custom_subject_quiz if custom_subject_quiz else (auto_subject or "General")
+                    col1, col2 = st.columns([0.6, 0.4])
+                    with col1: num_questions = st.slider("Number of questions:", 3, 10, 5, key="article_quiz_num_multi")
+                    with col2:
+                        if st.button("🎯 Generate Quiz", use_container_width=True, key="btn_gen_article_quiz_multi"):
+                            st.session_state['generating_article_quiz'] = True
+                    
+                    if st.session_state.get('generating_article_quiz'):
+                        with st.spinner("🧠 Generating questions..."):
+                            questions, error = generate_syllabus_quiz(final_subject_quiz, summary_text, num_questions)
+                            if error: st.error(error)
+                            else:
+                                st.session_state['current_article_quiz'] = questions
+                                st.session_state['article_quiz_subject'] = final_subject_quiz
+                                st.session_state['article_quiz_started'] = True
+                                st.session_state['generating_article_quiz'] = False
+                    
+                    if st.session_state.get('article_quiz_started') and st.session_state.get('current_article_quiz'):
+                        st.markdown("---"); st.subheader(f"📋 Quiz - {final_subject_quiz}")
+                        questions = st.session_state['current_article_quiz']
+                        user_answers = []
+                        for idx, question in enumerate(questions):
+                            st.markdown(f"**Q{idx+1}. {question['question']}**")
+                            ans = st.radio(f"Opt for Q{idx+1}:", question['options'], key=f"multi_q_{idx}", label_visibility="collapsed")
+                            user_answers.append(question['options'].index(ans))
+                            st.caption(f"Difficulty: {question.get('difficulty', 'Medium')}"); st.markdown("---")
+                        if st.button("✅ Submit Quiz", use_container_width=True, key="submit_article_quiz_multi"):
+                                eval_result, eval_error = evaluate_quiz_response(questions, user_answers)
+                                if eval_error: st.error(eval_error)
+                                else:
+                                    st.session_state['article_quiz_results'] = eval_result
+                                    st.session_state['article_quiz_started'] = False
+                                    save_result((final_subject_quiz, len(questions), len(questions), eval_result['correct'], eval_result['wrong'], eval_result['percentage'], eval_result['score']))
+                                    safe_rerun()
+                    
+                    if st.session_state.get('article_quiz_results'):
+                        st.markdown("---"); st.subheader(f"📊 Quiz Results - {final_subject_quiz}")
+                        results = st.session_state['article_quiz_results']
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Score", f"{results['score']}/{results['total']}")
+                        c2.metric("Percentage", f"{results['percentage']}%")
+                        c3.metric("Rating", "🏆" if results['percentage'] >= 70 else "📚")
+                        for idx, result in enumerate(results['results'], 1):
+                            status = "✅" if result['is_correct'] else "❌"
+                            with st.expander(f"{status} Q{idx}. {result['question']}", expanded=not result['is_correct']):
+                                st.write(f"**Your Answer:** {result['user_answer']}")
+                                st.write(f"**Correct Answer:** {result['correct_answer']}")
+                                st.markdown(f"**Explanation:** {result['explanation']}")
+                        if st.button("🔄 New Quiz", use_container_width=True, key="retry_multi_quiz"):
+                            st.session_state['article_quiz_results'] = None; st.session_state['article_quiz_started'] = False; safe_rerun()
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #   AI ANALYSIS
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "AI Analysis":
     st.subheader("🤖 AI-Powered Quiz Analysis")
+    st.markdown("""
+**Summary Report:**
+
+This section displays AI-generated analysis reports for your quizzes and test papers. Each report includes detailed insights, error patterns, and actionable recommendations to help you optimize your preparation and avoid repeating mistakes.
+    """)
     st.markdown("Generate deep AI insights from your quiz performance over a selected period.")
 
     results = get_results()
@@ -1263,9 +2183,237 @@ Be specific, thorough, and UPSC-focused."""
 
 # ══════════════════════════════════════════════════════════════════════════════
 #   TEST PAPER ANALYSIS
+    
+    st.markdown("""
+    Get crisp, UPSC-focused summaries of:
+    - **Yojana** - Government schemes & policies
+    - **Kurukshetra** - Rural development & governance  
+    - **Economic Survey** - Economic analysis & data
+    - **Union Budget** - Financial allocations & priorities
+    - **India Yearbook** - Facts, figures & institutions
+    
+    Sourced from: Next IAS, Vision IAS, Forum IAS, Vajiram & Ravi
+    """)
+    
+    st.markdown("---")
+    
+    # ── Resource Type Selection ────────────────────────────────────────────────
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        resource_type = st.selectbox(
+            "Select Resource Type",
+            options=get_all_resource_types(),
+            key="select_resource_type"
+        )
+    with col2:
+        st.write("")
+        st.write("")
+        if st.button("📖 View Sources", use_container_width=True):
+            st.session_state['show_sources'] = not st.session_state.get('show_sources', False)
+            safe_rerun()
+    
+    # ── Show coaching institute sources ─────────────────────────────────────────
+    if st.session_state.get('show_sources', False):
+        resource_urls = RESOURCE_URLS[resource_type]
+        st.info(f"""
+        **{resource_type}**  
+        {resource_urls['description']}
+        
+        **Primary Sources (Fetched First):**
+        {chr(10).join([f"• {url}" for url in resource_urls['primary_urls']])}
+        
+        **Backup Sources:**
+        {chr(10).join([f"• {url}" for url in resource_urls['backup_urls']])}
+        """)
+    
+    st.markdown("---")
+    
+    # ── Fetch from Internet ────────────────────────────────────────────────────
+    st.subheader(f"🌐 {resource_type} - Auto-Fetch & Summarize")
+    
+    st.caption("📡 AI automatically fetches latest content from multiple sources and generates crisp UPSC-relevant summaries")
+    
+    # Option 1: Fetch from Internet
+    col_fetch, col_space = st.columns([2, 1])
+    with col_fetch:
+        if st.button("🔍 Fetch Latest from Internet", use_container_width=True, key="btn_fetch_latest"):
+            with st.spinner(f"📡 Fetching {resource_type} content from multiple sources..."):
+                articles, errors = fetch_resource_content(resource_type)
+                
+                if articles:
+                    st.session_state['fetched_articles'] = articles
+                    st.session_state['fetched_errors'] = errors
+                    st.success(f"✅ Fetched {len(articles)} source(s)")
+                    
+                    # Show what was fetched
+                    with st.expander("📜 View Fetched Sources"):
+                        for idx, article in enumerate(articles, 1):
+                            st.markdown(f"**Source {idx}: {article['url']}**")
+                            st.caption(f"Fetched: {article['fetched_at']}")
+                            st.text(article['content'][:500] + "..." if len(article['content']) > 500 else article['content'])
+                    
+                    # Show any errors
+                    if errors:
+                        with st.expander("⚠️ Fetch Errors"):
+                            for error in errors:
+                                st.warning(error)
+                else:
+                    st.error("❌ Could not fetch from any sources. Try manual entry below.")
+                    if errors:
+                        with st.expander("See errors"):
+                            for error in errors:
+                                st.write(error)
+    
+    # Option 2: Generate summary from fetched content
+    if st.session_state.get('fetched_articles'):
+        st.markdown("---")
+        st.subheader("📝 Generate Summary from Fetched Content")
+        
+        if st.button("🤖 Generate AI Summary", use_container_width=True, key="btn_gen_from_fetched"):
+            fetched_articles = st.session_state.get('fetched_articles', [])
+            combined_content = combine_articles_for_summary(fetched_articles)
+            
+            with st.spinner("✍️ Generating crisp UPSC-focused summary..."):
+                prompt = f"""You are an expert UPSC coach. Analyze the following content fetched from {resource_type} sources and create a COMPREHENSIVE, CONCISE summary that combines insights from ALL sources.
+
+**FETCHED CONTENT:**
+{combined_content}
+
+**YOUR TASK:**
+1. Analyze ALL sources above
+2. Extract ONLY UPSC-RELEVANT information
+3. Combine insights and avoid duplication
+4. Create ONE crisp summary (max 300 words of content)
+
+**FORMAT (STRICT):**
+
+## 📌 Overview
+1-2 sentence summary combining all sources
+
+## 🎯 Key Topics Covered
+• Topic 1 from sources
+• Topic 2 from combined analysis
+• Topic 3 synthesis
+(3-5 major points)
+
+## 💡 UPSC Relevance
+- Relevant GSs: [Papers]
+- Why matters: [How it affects exams]
+- Key takeaways: [Exam-focus]
+
+## 📊 Key Figures/Data (if applicable)
+• Data point 1
+• Data point 2
+
+## 🔗 Related Areas
+- Adjacent topic 1
+- Adjacent topic 2
+
+---
+
+NO FLUFF. Pure exam-focused content synthesized from all sources."""
+                
+                ai_summary = ask_llm(prompt)
+                st.session_state['generated_summary'] = ai_summary
+                st.session_state['generated_title'] = f"{resource_type} Summary - {datetime.now().strftime('%B %Y')}"
+                st.success("✅ Summary generated from internet sources!")
+    
+    # Display and save generated summary
+    if st.session_state.get('generated_summary'):
+        st.markdown("---")
+        st.markdown("### 📄 Generated Summary")
+        st.markdown(st.session_state['generated_summary'])
+        
+        col_save, col_discard = st.columns(2)
+        with col_save:
+            if st.button("💾 Save This Summary", use_container_width=True, key="btn_save_internet_summary"):
+                saved_id = save_syllabus_summary(
+                    resource_type,
+                    st.session_state['generated_title'],
+                    st.session_state['generated_summary'],
+                    f"Fetched from internet sources: {', '.join([a['url'] for a in st.session_state.get('fetched_articles', [])])}"
+                )
+                if saved_id:
+                    st.success("✅ Summary saved!")
+                    del st.session_state['generated_summary']
+                    del st.session_state['generated_title']
+                    safe_rerun()
+                else:
+                    st.error("Error saving summary")
+        
+        with col_discard:
+            if st.button("❌ Discard", use_container_width=True, key="btn_discard_internet"):
+                del st.session_state['generated_summary']
+                del st.session_state['generated_title']
+                safe_rerun()
+    
+    # Option 3: Manual Entry (Fallback)
+    st.markdown("---")
+    st.subheader("✏️ Manual Entry (Fallback)")
+    st.caption("If automatic fetch doesn't work, paste content manually here")
+    
+    with st.expander("Paste custom content"):
+        summary_title = st.text_input("Title", key="manual_title")
+        summary_content = st.text_area("Content", height=250, key="manual_content")
+        source_url = st.text_input("Source URL", key="manual_url")
+        
+        if st.button("💾 Save Manual Summary", use_container_width=True, key="btn_save_manual"):
+            if summary_title and summary_content:
+                if not is_upsc_relevant_topic(summary_title):
+                    st.error("Title must be UPSC-relevant (education, policy, government, etc.)")
+                else:
+                    saved_id = save_syllabus_summary(resource_type, summary_title, summary_content, source_url)
+                    if saved_id:
+                        st.success("✅ Summary saved!")
+                        safe_rerun()
+            else:
+                st.warning("Title and content required")
+    
+    st.markdown("---")
+    
+    # ── View Saved Summaries ───────────────────────────────────────────────────
+    st.subheader(f"📚 Saved {resource_type} Summaries")
+    
+    saved_summaries = get_syllabus_summaries(resource_type)
+    
+    if saved_summaries:
+        for idx, (summary_id, res_type, title, content, source_url, saved_at) in enumerate(saved_summaries):
+            with st.expander(f"📄 {title} ({saved_at.strftime('%Y-%m-%d') if saved_at else 'Unknown'})"):
+                st.markdown(content)
+                
+                if source_url:
+                    st.markdown(f"🔗 [Source]({source_url})")
+                
+                # Delete button with confirmation
+                col_delete, col_empty = st.columns([1, 3])
+                with col_delete:
+                    if st.button(f"🗑️ Delete", key=f"del_btn_{summary_id}_{idx}"):
+                        # Show confirmation dialog
+                        confirm_col1, confirm_col2 = st.columns(2)
+                        with confirm_col1:
+                            if st.button(f"✅ Yes, Delete", key=f"confirm_del_{summary_id}_{idx}"):
+                                if delete_syllabus_summary(summary_id):
+                                    st.success("✅ Deleted!")
+                                    safe_rerun()
+                                else:
+                                    st.error("Error deleting")
+                        with confirm_col2:
+                            if st.button(f"❌ Cancel", key=f"cancel_del_{summary_id}_{idx}"):
+                                st.info("Deletion cancelled")
+    else:
+        st.info(f"No {resource_type} summaries saved yet. Fetch and generate one above!")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#   TEST PAPER ANALYSIS
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "Test Paper Analysis":
     st.subheader("📝 Test Paper Analysis")
+    st.markdown("""
+**Summary Report:**
+
+This section provides a comprehensive summary of your test paper performance, including scores, accuracy, strengths, weaknesses, and trends over time. Use this report to identify areas for improvement and track your progress across all attempted test papers.
+    """)
 
     # ── INPUT FORM ────────────────────────────────────────────────────────────
     with st.expander("➕ Add New Test Entry", expanded=True):
@@ -1336,17 +2484,13 @@ elif page == "Test Paper Analysis":
 
             total_guessed    = (tp_gc or 0) + (tp_gi or 0)
             total_correct    = (tp_att - (tp_gi or 0)) + (tp_gc or 0)  # attempted correct + guessed correct
-            # Actually: correct = attempted_correct + guessed_correct
-            # We don't store attempted_correct separately, so:
+            # Actually: correct = attempted correct + guessed correct
+            # We don't store attempted correct separately, so:
             # wrong = attempted - guessed_correct (only guessed_incorrect + truly wrong among non-guessed)
             # Simplify: total correct = total_att - total_wrong; we know guessed_incorrect → wrong
             # Better formula given inputs:
             # wrong = (guessed_incorrect) + (attempted - total_guessed - correct_in_non_guessed)
             # Since we don't have "correct in non-guessed" separately, use overall:
-            # total_correct_all = guessed_correct + (attempted - total_guessed - wrong_non_guessed)
-            # We'll derive from: total attempted base = attempted (includes guessed)
-            # wrong = attempted - correct; but correct = guessed_correct + attempted_correct_non_guessed
-            # Since we don't store attempted_correct_non_guessed, treat the displayed metric as:
             # total_correct = (attempted - tp_gi) where attempted includes guessed attempts
             # This simplifies to: correct = attempted - wrong_guessed = attempted - tp_gi
             # But that ignores non-guessed wrong... We'll use the standard formula:
