@@ -1958,16 +1958,35 @@ def get_config(key, default=None):
 
 # ── USER AUTHENTICATION (DB-BACKED) ──────────────────────────────────────────
 
+def _get_credential(env_key: str, default: str = None) -> str:
+    """Retrieve credential securely from environment variable or streamlit secrets."""
+    val = os.getenv(env_key)
+    if val:
+        return val
+    try:
+        import streamlit as st
+        return st.secrets.get(env_key, default)
+    except Exception:
+        return default
+
 def _seed_default_users(connection):
-    """Seed requested default users and ensure their credentials."""
+    """Seed requested default users and ensure their credentials from env/secrets."""
     if not connection:
         return
     try:
-        default_users = [
-            ("satyam", "r!5ha5@15ris", "user"),
-            ("sneha", "foryoumylove", "user"),
-            ("admin", "rishav", "admin")
-        ]
+        default_users = []
+        user_name = _get_credential("DEFAULT_USER_USERNAME")
+        user_pass = _get_credential("DEFAULT_USER_PASSWORD")
+        if user_name and user_pass:
+            default_users.append((user_name, user_pass, "user"))
+
+        admin_name = _get_credential("DEFAULT_ADMIN_USERNAME")
+        admin_pass = _get_credential("DEFAULT_ADMIN_PASSWORD")
+        if admin_name and admin_pass:
+            default_users.append((admin_name, admin_pass, "admin"))
+
+        if not default_users:
+            return
         with connection.cursor() as c:
             for username, password, role in default_users:
                 c.execute("""
@@ -2339,15 +2358,18 @@ def toggle_user_active(username):
             conn.close()
 
 def delete_user(username):
-    """Delete a user from the database."""
+    """Delete a user and their tenant schema from the database."""
     conn = get_connection()
     if not conn:
         return False
     try:
+        schema = get_tenant_schema(username)
         with conn.cursor() as c:
             c.execute("DELETE FROM users WHERE username = %s", (username,))
+            c.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         conn.commit()
-        return c.rowcount > 0
+        _initialized_tenant_schemas.discard(schema)
+        return True
     except Exception as e:
         print(f"Error deleting user: {e}")
         _safe_rollback(conn)

@@ -10,4 +10,4 @@ extra-streamlit-components
 requests
 beautifulsoup4
 lxml
-feedparser
+plotly

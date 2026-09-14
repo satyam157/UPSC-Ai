@@ -7,7 +7,8 @@ import json
 from ui_components import (
     CUSTOM_CSS, login_page, logout, safe_rerun
 )
-from db import init_db, user_exists, is_admin, validate_session_token, get_user_allowed_pages
+from db import init_db, user_exists, is_admin, validate_session_token, get_user_allowed_pages, get_unified_test_records
+from codeforces_visualizer import get_tier_info
 
 # Page imports
 from page_ca import show_ca_page
@@ -184,7 +185,91 @@ with st.sidebar:
         st.markdown('<span style="color:#a78bfa;font-size:12px;font-weight:600;">👑 Administrator</span>', unsafe_allow_html=True)
     else:
         st.markdown('<span style="color:#34d399;font-size:12px;font-weight:600;">🎓 Aspirant</span>', unsafe_allow_html=True)
-    
+
+    # ── Sidebar Rating Cards ──────────────────────────────────────────────────
+    def _sidebar_rating_html(exam_type):
+        recs = get_unified_test_records(username=username, exam_type=exam_type)
+        if not recs:
+            return ""
+        from datetime import date as _date, datetime as _datetime, timezone as _tz, timedelta as _td
+        today = _datetime.now(_tz(_td(hours=5, minutes=30))).date()  # IST
+        sorted_recs = sorted(recs, key=lambda r: r["date"])
+        all_marks = [float(r["marks"]) for r in sorted_recs]
+        highest_m = max(all_marks)
+        high_tier = get_tier_info(highest_m, exam_type)
+        denom = 200 if exam_type == "Prelims" else 250
+        label = "🎯 Prelims" if exam_type == "Prelims" else "✍️ Mains"
+
+        def rec_date(r):
+            d = r["date"]
+            return d.date() if isinstance(d, _datetime) else d
+
+        today_recs = [r for r in sorted_recs if rec_date(r) == today]
+        has_today  = len(today_recs) > 0
+
+        if has_today:
+            current_m = float(today_recs[-1]["marks"])
+            cur_tier  = get_tier_info(current_m, exam_type)
+            prior = [float(r["marks"]) for r in sorted_recs if rec_date(r) < today]
+            delta_html = ""
+            if prior:
+                diff = current_m - prior[-1]
+                if diff > 0:
+                    delta_html = f'<span style="color:#4ade80;font-size:10px;">&#9650;+{diff:.1f}</span>'
+                elif diff < 0:
+                    delta_html = f'<span style="color:#f87171;font-size:10px;">&#9660;{diff:.1f}</span>'
+            current_inner = f"""
+              <div style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;">Today</div>
+              <div style="font-size:18px;font-weight:800;color:{cur_tier['color']};line-height:1.1;">
+                {current_m:.1f}<span style="font-size:11px;color:#475569;font-weight:400;">/{denom}</span>
+                &nbsp;{delta_html}
+              </div>
+              <div style="font-size:9px;color:{cur_tier['color']};background:{cur_tier['color']}18;
+                          border:1px solid {cur_tier['color']}30;border-radius:10px;
+                          padding:1px 6px;display:inline-block;margin-top:2px;font-weight:600;">
+                {cur_tier['name']}
+              </div>"""
+            left_border = cur_tier['color']
+        else:
+            current_inner = f"""
+              <div style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;">Today</div>
+              <div style="font-size:16px;font-weight:700;color:#475569;line-height:1.2;">
+                &#8212;/{denom}
+              </div>
+              <div style="font-size:9px;color:#64748b;margin-top:2px;">No test today</div>"""
+            left_border = "#475569"
+
+        return f"""
+        <div style="margin:6px 0;padding:10px 12px;background:linear-gradient(135deg,#161b22,#1e2430);
+                    border-radius:10px;border-left:3px solid {left_border};font-family:Inter,sans-serif;">
+          <div style="font-size:10px;color:#94a3b8;font-weight:600;letter-spacing:.8px;margin-bottom:4px;">
+            {label}
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+            <div style="flex:1;">
+              {current_inner}
+            </div>
+            <div style="width:1px;height:40px;background:rgba(255,255,255,0.08);"></div>
+            <div style="flex:1;text-align:right;">
+              <div style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;">&#127942; Highest</div>
+              <div style="font-size:18px;font-weight:800;color:{high_tier['color']};line-height:1.1;">
+                {highest_m:.1f}<span style="font-size:11px;color:#475569;font-weight:400;">/{denom}</span>
+              </div>
+              <div style="font-size:9px;color:{high_tier['color']};background:{high_tier['color']}18;
+                          border:1px solid {high_tier['color']}30;border-radius:10px;
+                          padding:1px 6px;display:inline-block;margin-top:2px;font-weight:600;">
+                {high_tier['name']}
+              </div>
+            </div>
+          </div>
+        </div>
+        """
+
+    sidebar_prelims_html = _sidebar_rating_html("Prelims")
+    sidebar_mains_html   = _sidebar_rating_html("Mains")
+    if sidebar_prelims_html or sidebar_mains_html:
+        st.markdown(sidebar_prelims_html + sidebar_mains_html, unsafe_allow_html=True)
+
     st.markdown("---")
 
     ALL_STANDARD_PAGES = [

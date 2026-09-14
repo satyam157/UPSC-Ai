@@ -10,9 +10,18 @@ UPSC-AI Codeforces-Style Performance Visualizer
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import plotly.graph_objects as go
+
+# IST = UTC+5:30. Always use this for 'today' so date comparisons
+# match the user's local calendar, not the UTC server clock.
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+def _today_ist() -> date:
+    """Returns today's date in Indian Standard Time (IST = UTC+5:30)."""
+    return datetime.now(_IST).date()
 
 
 # ─── TIER DEFINITIONS ────────────────────────────────────────────────────────
@@ -282,7 +291,7 @@ def calculate_codeforces_stats(records, target_year=None):
             "day_counts": {}, "day_test_counts": {}
         }
 
-    today = date.today()
+    today = _today_ist()
     one_year_ago = today - timedelta(days=365)
     one_month_ago = today - timedelta(days=30)
 
@@ -390,8 +399,8 @@ def render_codeforces_heatmap_html(records, exam_type="Prelims", selected_year="
     stats = calculate_codeforces_stats(records)
     day_counts = stats["day_counts"]
     day_test_counts = stats["day_test_counts"]
-    
-    today = date.today()
+
+    today = _today_ist()
     
     # Determine start and end date for 52 weeks
     if selected_year and selected_year != "All Time":
@@ -589,6 +598,167 @@ def render_codeforces_heatmap_html(records, exam_type="Prelims", selected_year="
     return card_html
 
 
+# ─── CODEFORCES RATING CARD ──────────────────────────────────────────────────
+
+def render_rating_card_html(records, exam_type="Prelims", scale_mode="Standard"):
+    """
+    Renders a Codeforces-style rating badge showing:
+    - Current Rating: today's test marks (or 'No test today' if none)
+    - Highest Rating: best marks ever achieved with tier name and color
+    Both displayed as marks/denomination (e.g., 128/200 or 105/250).
+    """
+    if not records:
+        return ""
+
+    is_prelims = (exam_type.lower() == "prelims")
+    max_possible = 200 if is_prelims else 250
+    exam_label = "Prelims" if is_prelims else "Mains"
+    today = _today_ist()
+
+    # Sort chronologically
+    sorted_records = sorted(records, key=lambda r: r["date"])
+
+    # Compute marks values (respect scale_mode)
+    def scaled_marks(r):
+        m_val = float(r["marks"])
+        if scale_mode == "Standardized (200/250)" and r.get("total_marks") and r["total_marks"] > 0:
+            std_max = 200.0 if is_prelims else 250.0
+            if r["total_marks"] != std_max and r["total_marks"] <= 50:
+                m_val = round((m_val / float(r["total_marks"])) * std_max, 2)
+        return m_val
+
+    all_marks = [scaled_marks(r) for r in sorted_records]
+
+    # ── Highest Rating (all time) ──
+    highest_marks = max(all_marks)
+    highest_tier  = get_tier_info(highest_marks, exam_type)
+    highest_idx   = all_marks.index(highest_marks)
+    highest_date  = sorted_records[highest_idx]["date"]
+    highest_date_str = highest_date.strftime("%d %b %Y") if hasattr(highest_date, "strftime") else str(highest_date)[:10]
+
+    # ── Current Rating: today's test only ──
+    def record_date(r):
+        d = r["date"]
+        if isinstance(d, datetime):
+            return d.date()
+        return d
+
+    today_records = [r for r in sorted_records if record_date(r) == today]
+    has_today = len(today_records) > 0
+
+    if has_today:
+        # Use the latest test of today (last in sorted order)
+        today_marks_list = [scaled_marks(r) for r in today_records]
+        current_marks = today_marks_list[-1]
+        current_tier  = get_tier_info(current_marks, exam_type)
+        current_date_str = today.strftime("%d %b %Y")
+        # Delta vs previous test before today
+        prior_marks = [m for r, m in zip(sorted_records, all_marks) if record_date(r) < today]
+        delta_html = ""
+        if prior_marks:
+            diff = current_marks - prior_marks[-1]
+            if diff > 0:
+                delta_html = f'<span style="color:#4ade80;font-size:13px;margin-left:8px;">&#9650; +{diff:.1f}</span>'
+            elif diff < 0:
+                delta_html = f'<span style="color:#f87171;font-size:13px;margin-left:8px;">&#9660; {diff:.1f}</span>'
+            else:
+                delta_html = '<span style="color:#94a3b8;font-size:13px;margin-left:8px;">&#8212; 0.0</span>'
+    else:
+        current_marks    = None
+        current_tier     = None
+        current_date_str = today.strftime("%d %b %Y")
+        delta_html       = ""
+
+    # ── Build Current Rating block HTML ──
+    if has_today:
+        cur_color = current_tier['color']
+        current_block_html = f"""
+      <div style="
+        flex: 1;
+        background: linear-gradient(135deg, #161b22 0%, #1e2430 100%);
+        border: 1px solid {cur_color}40;
+        border-left: 4px solid {cur_color};
+        border-radius: 12px;
+        padding: 16px 20px;
+        position: relative;
+        overflow: hidden;
+      ">
+        <div style="position:absolute;top:-20px;right:-20px;width:80px;height:80px;
+                    background:{cur_color}08;border-radius:50%;"></div>
+        <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px;">
+          Today's {exam_label} Rating
+        </div>
+        <div style="display:flex;align-items:baseline;gap:4px;">
+          <span style="font-size:32px;font-weight:800;color:{cur_color};line-height:1.1;
+                       text-shadow:0 0 20px {cur_color}30;">{current_marks:.1f}</span>
+          <span style="font-size:16px;color:#64748b;font-weight:500;">/ {max_possible}</span>
+          {delta_html}
+        </div>
+        <div style="display:inline-block;margin-top:8px;padding:3px 10px;
+                    background:{cur_color}18;border:1px solid {cur_color}35;
+                    border-radius:20px;font-size:12px;font-weight:600;color:{cur_color};">
+          {current_tier['name']}
+        </div>
+        <div style="font-size:11px;color:#64748b;margin-top:6px;">&#128197; {current_date_str}</div>
+      </div>"""
+    else:
+        current_block_html = f"""
+      <div style="
+        flex: 1;
+        background: linear-gradient(135deg, #161b22 0%, #1e2430 100%);
+        border: 1px solid rgba(148,163,184,0.2);
+        border-left: 4px solid #475569;
+        border-radius: 12px;
+        padding: 16px 20px;
+      ">
+        <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px;">
+          Today's {exam_label} Rating
+        </div>
+        <div style="font-size:22px;font-weight:700;color:#475569;line-height:1.2;">&#8212; / {max_possible}</div>
+        <div style="font-size:12px;color:#64748b;margin-top:8px;">No test recorded today</div>
+        <div style="font-size:11px;color:#475569;margin-top:4px;">&#128197; {current_date_str}</div>
+      </div>"""
+
+    # ── Build Highest Rating block HTML ──
+    hi_color = highest_tier['color']
+    highest_block_html = f"""
+      <div style="
+        flex: 1;
+        background: linear-gradient(135deg, #161b22 0%, #1a1520 100%);
+        border: 1px solid {hi_color}40;
+        border-left: 4px solid {hi_color};
+        border-radius: 12px;
+        padding: 16px 20px;
+        position: relative;
+        overflow: hidden;
+      ">
+        <div style="position:absolute;top:-20px;right:-20px;width:80px;height:80px;
+                    background:{hi_color}08;border-radius:50%;"></div>
+        <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px;">
+          &#127942; Highest {exam_label} Rating
+        </div>
+        <div style="display:flex;align-items:baseline;gap:4px;">
+          <span style="font-size:32px;font-weight:800;color:{hi_color};line-height:1.1;
+                       text-shadow:0 0 20px {hi_color}30;">{highest_marks:.1f}</span>
+          <span style="font-size:16px;color:#64748b;font-weight:500;">/ {max_possible}</span>
+        </div>
+        <div style="display:inline-block;margin-top:8px;padding:3px 10px;
+                    background:{hi_color}18;border:1px solid {hi_color}35;
+                    border-radius:20px;font-size:12px;font-weight:600;color:{hi_color};">
+          {highest_tier['name']}
+        </div>
+        <div style="font-size:11px;color:#64748b;margin-top:6px;">&#128197; Achieved on {highest_date_str}</div>
+      </div>"""
+
+    card_html = f"""
+    <div style="display:flex;gap:16px;margin-bottom:16px;font-family:Inter,-apple-system,sans-serif;">
+      {current_block_html}
+      {highest_block_html}
+    </div>
+    """
+    return card_html
+
+
 # ─── HIGH-LEVEL DASHBOARD RENDERER ──────────────────────────────────────────
 
 def render_codeforces_dashboard(records, exam_type="Prelims", username=None):
@@ -631,10 +801,24 @@ def render_codeforces_dashboard(records, exam_type="Prelims", username=None):
             help="Filter heatmap by test year"
         )
 
-    # 2. Codeforces Marks Graph
+    # 2. Rating Card (Current + Highest)
+    rating_card_html = render_rating_card_html(records, exam_type=exam_type, scale_mode=scale_mode)
+    if rating_card_html:
+        st.markdown(rating_card_html, unsafe_allow_html=True)
+
+    # 3. Codeforces Marks Graph
     fig = build_codeforces_graph_fig(records, exam_type=exam_type, scale_mode=scale_mode)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    # 3. Codeforces Activity Heatmap & 3-Column Stats Block
+    # 4. Codeforces Activity Heatmap & 3-Column Stats Block
     heatmap_html = render_codeforces_heatmap_html(records, exam_type=exam_type, selected_year=selected_year)
-    st.markdown(heatmap_html, unsafe_allow_html=True)
+    # Use components.html so the full grid HTML renders (st.markdown strips complex HTML)
+    full_heatmap_page = f"""
+    <!DOCTYPE html><html><head>
+    <meta charset="utf-8">
+    <style>body{{margin:0;padding:0;background:transparent;}}</style>
+    </head><body>
+    {heatmap_html}
+    </body></html>
+    """
+    components.html(full_heatmap_page, height=420, scrolling=False)
